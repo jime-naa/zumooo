@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Bluetooth, 
   BluetoothConnected, 
@@ -10,9 +10,8 @@ import {
   Activity, 
   Layers, 
   ShieldAlert, 
-  Volume2, 
-  VolumeX,
-  Gauge
+  Gauge,
+  Sliders
 } from 'lucide-react';
 import { bleService } from './services/bleService';
 import { BleConnectionStatus, BleTelemetry, LeverValues, MotorSpeeds } from './types';
@@ -28,6 +27,9 @@ export default function App() {
     left: 0,
     right: 0,
   });
+
+  // Intervalo de Throttling configurable (50ms a 100ms)
+  const [throttleMs, setThrottleMs] = useState<number>(60);
 
   // Estado BLE
   const [bleStatus, setBleStatus] = useState<BleConnectionStatus>(bleService.status);
@@ -47,7 +49,6 @@ export default function App() {
   const [isFirmwareOpen, setIsFirmwareOpen] = useState(false);
   const [showSimulator, setShowSimulator] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [soundEnabled, setSoundEnabled] = useState(false);
   const [snappingEnabled, setSnappingEnabled] = useState(true);
 
   // Watchdog virtual indicador (se reinicia con cada paquete)
@@ -58,12 +59,21 @@ export default function App() {
   // la palanca central se anula automáticamente.
   const isOverrideActive = Math.abs(levers.left) > 3 || Math.abs(levers.right) > 3;
 
-  // Cálculo de tracción a motores:
+  // Cálculo de tracción efectiva a motores:
   const motorSpeeds: MotorSpeeds = isOverrideActive
     ? { left: levers.left, right: levers.right }
     : { left: levers.center, right: levers.center };
 
-  // Suscripción al servicio BLE
+  // Sincronizar el Throttling en BleService cada vez que cambian las palancas
+  useEffect(() => {
+    bleService.updateLevers({
+      center: isOverrideActive ? 0 : levers.center,
+      left: levers.left,
+      right: levers.right,
+    });
+  }, [levers, isOverrideActive]);
+
+  // Suscripción al servicio BLE y a la telemetría
   useEffect(() => {
     bleService.onStatusChange((status, errorMsg) => {
       setBleStatus(status);
@@ -81,35 +91,6 @@ export default function App() {
     };
   }, []);
 
-  // Control de flujo (Throttling) con requestAnimationFrame y Rate Limiter (25 Hz)
-  const lastTransmitRef = useRef<number>(0);
-  const leversRef = useRef(levers);
-  leversRef.current = levers;
-
-  useEffect(() => {
-    let animId: number;
-
-    const transmitLoop = () => {
-      const now = performance.now();
-      // Transmitir cada 40 ms (25 Hz) si hay conexión
-      if (now - lastTransmitRef.current >= 40) {
-        lastTransmitRef.current = now;
-        if (bleService.status === 'connected') {
-          const current = leversRef.current;
-          bleService.sendLevers({
-            center: isOverrideActive ? 0 : current.center,
-            left: current.left,
-            right: current.right,
-          });
-        }
-      }
-      animId = requestAnimationFrame(transmitLoop);
-    };
-
-    animId = requestAnimationFrame(transmitLoop);
-    return () => cancelAnimationFrame(animId);
-  }, [isOverrideActive]);
-
   // Temporizador para simular barra de watchdog en el HUD
   useEffect(() => {
     const timer = setInterval(() => {
@@ -118,7 +99,13 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
-  // Manejadores de palancas individuales
+  // Actualizar intervalo de Throttling (50ms - 100ms)
+  const handleThrottleChange = (ms: number) => {
+    setThrottleMs(ms);
+    bleService.setThrottleInterval(ms);
+  };
+
+  // Manejadores de palancas individuales (actualizan estado local de inmediato)
   const handleCenterChange = useCallback((val: number) => {
     setLevers((prev) => ({ ...prev, center: val }));
   }, []);
@@ -131,11 +118,10 @@ export default function App() {
     setLevers((prev) => ({ ...prev, right: val }));
   }, []);
 
+  // Parada inmediata de emergencia
   const handleEmergencyStop = () => {
     setLevers({ center: 0, left: 0, right: 0 });
-    if (bleService.status === 'connected') {
-      bleService.sendLevers({ center: 0, left: 0, right: 0 });
-    }
+    bleService.forceStopImmediate();
   };
 
   // Conectar / Desconectar Bluetooth
@@ -147,7 +133,7 @@ export default function App() {
     }
   };
 
-  // Pantalla Completa
+  // Alternar Pantalla Completa
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
       document.documentElement.requestFullscreen().catch(() => {});
@@ -174,7 +160,7 @@ export default function App() {
           break;
         case 'a':
         case 'arrowleft':
-          // Giro diferencial a la izquierda: rueda izq atrás, rueda der adelante
+          // Giro diferencial a la izquierda
           setLevers((prev) => ({ ...prev, left: -80, right: 80 }));
           break;
         case 'd':
@@ -224,10 +210,10 @@ export default function App() {
   return (
     <div className="relative w-screen h-screen min-h-[460px] bg-slate-950 text-slate-100 flex flex-col overflow-hidden select-none font-sans">
       
-      {/* Guía si el usuario sostiene el móvil en vertical */}
+      {/* Guía visual si el móvil se coloca en vertical */}
       <LandscapeHelper onToggleFullscreen={toggleFullscreen} />
 
-      {/* MODAL DE FIRMWARE Y ESQUEMÁTICO */}
+      {/* Modal de Firmware ESP32 y Diagrama */}
       <FirmwareModal
         isOpen={isFirmwareOpen}
         onClose={() => setIsFirmwareOpen(false)}
@@ -253,13 +239,38 @@ export default function App() {
           </div>
         </div>
 
-        {/* Zona 2: Estado de Señal y Failsafe Watchdog */}
-        <div className="hidden md:flex items-center gap-4 text-xs font-mono text-slate-400">
+        {/* Zona 2: Control de Throttling y Frecuencia TX */}
+        <div className="hidden md:flex items-center gap-3 text-xs font-mono text-slate-400">
+          <div className="flex items-center gap-1.5 bg-slate-950/70 px-2 py-0.5 rounded border border-slate-800">
+            <Sliders className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="text-[10px] uppercase text-slate-500">Throttling:</span>
+            <div className="flex items-center gap-1 ml-1">
+              {[50, 60, 80, 100].map((ms) => (
+                <button
+                  key={ms}
+                  onClick={() => handleThrottleChange(ms)}
+                  className={`px-1.5 py-0.2 rounded text-[10px] transition-colors ${
+                    throttleMs === ms
+                      ? 'bg-cyan-500 text-slate-950 font-bold'
+                      : 'text-slate-400 hover:text-slate-200 bg-slate-900'
+                  }`}
+                  title={`Intervalo de envío BLE de ${ms}ms`}
+                >
+                  {ms}ms
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <span aria-hidden="true" className="text-slate-700">|</span>
+
           <div className="flex items-center gap-1.5">
             <Activity className="w-3.5 h-3.5 text-cyan-400" />
             <span>TX: {telemetry.packetsPerSec} Hz</span>
           </div>
+
           <span aria-hidden="true" className="text-slate-700">|</span>
+
           <div className="flex items-center gap-1.5">
             <span className="text-[10px] uppercase text-slate-500">Watchdog:</span>
             <div className="w-16 h-1.5 bg-slate-800 rounded-full overflow-hidden">
@@ -343,7 +354,7 @@ export default function App() {
         </div>
       </header>
 
-      {/* Alerta de Error BLE si ocurriera */}
+      {/* Alerta de Error BLE */}
       {bleError && (
         <div className="bg-rose-950/80 border-b border-rose-800 text-rose-200 px-4 py-1.5 text-xs flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -407,7 +418,7 @@ export default function App() {
             </button>
           </div>
 
-          {/* Área Central: O Bien el Simulador de Dohyo, o la Palanca Central Directa */}
+          {/* Área Central: Simulador de Dohyo y Palanca Central */}
           <div className="flex-1 flex items-center justify-around gap-2 my-1">
             
             {/* Palanca Central (Avance / Retroceso Rectilíneo) */}
@@ -449,15 +460,15 @@ export default function App() {
               </span>
             </div>
             <div className="p-1 rounded bg-slate-950/70 border border-slate-800">
-              <span className="text-slate-500 block text-[9px]">LATENCIA</span>
-              <span className="text-slate-200 font-bold">
-                {telemetry.lastLatencyMs} ms
+              <span className="text-slate-500 block text-[9px]">THROTTLING</span>
+              <span className="text-cyan-400 font-bold">
+                {throttleMs} ms ({Math.round(1000 / throttleMs)} Hz)
               </span>
             </div>
             <div className="p-1 rounded bg-slate-950/70 border border-slate-800">
-              <span className="text-slate-500 block text-[9px]">TOTAL TX</span>
+              <span className="text-slate-500 block text-[9px]">LATENCIA</span>
               <span className="text-slate-200 font-bold">
-                {telemetry.packetsSent} pkts
+                {telemetry.lastLatencyMs} ms
               </span>
             </div>
           </div>
@@ -490,7 +501,7 @@ export default function App() {
         <div className="flex items-center gap-3">
           <span>Táctil: Desliza pulgares en cada palanca</span>
           <span aria-hidden="true" className="hidden sm:inline">·</span>
-          <span className="hidden sm:inline">PC: Teclas W/S (Centro), A/D (Giro), Q/E (Orugas), Espacio (Stop)</span>
+          <span className="hidden sm:inline">PC: W/S (Centro), A/D (Giro), Q/E (Orugas), Espacio (Stop)</span>
         </div>
         <div className="flex items-center gap-2">
           <button

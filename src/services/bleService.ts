@@ -6,16 +6,25 @@ export const CHARACTERISTIC_UUID = 'beb5483e-36e1-4688-b7f5-ea07361b26a8';
 export class BleService {
   private device: BluetoothDevice | null = null;
   private characteristic: BluetoothRemoteGATTCharacteristic | null = null;
+  
+  // Control de flujo (Throttling / Mutex)
   private isWriting = false;
-  private pendingPayload: string | null = null;
-  private lastSentPayload: string = '';
+  private throttleIntervalMs: number = 60; // Configurable entre 50ms y 100ms
+  private throttleTimer: number | null = null;
+  private latestValues: LeverValues = { center: 0, left: 0, right: 0 };
+  private lastTransmittedValues: LeverValues = { center: 0, left: 0, right: 0 };
+  private hasUnsentChanges = false;
   private lastSentTime: number = 0;
+  private lastSentPayload: string = 'V:0,0,0';
+
+  // Métricas y Telemetría
   private packetCount: number = 0;
   private bytesSent: number = 0;
   private ppsCounter: number = 0;
   private currentPps: number = 0;
   private ppsTimer: number | null = null;
-  private heartbeatTimer: number | null = null;
+  
+  // Callbacks de eventos
   private statusChangeCallback: ((status: BleConnectionStatus, errorMsg?: string) => void) | null = null;
   private telemetryCallback: ((telemetry: BleTelemetry) => void) | null = null;
 
@@ -31,6 +40,18 @@ export class BleService {
 
   public isSupported(): boolean {
     return typeof navigator !== 'undefined' && !!navigator.bluetooth;
+  }
+
+  public getThrottleInterval(): number {
+    return this.throttleIntervalMs;
+  }
+
+  public setThrottleInterval(ms: number) {
+    this.throttleIntervalMs = Math.max(40, Math.min(200, ms));
+    // Reiniciar bucle con el nuevo intervalo si está conectado
+    if (this.status === 'connected') {
+      this.startThrottleLoop();
+    }
   }
 
   public onStatusChange(callback: (status: BleConnectionStatus, errorMsg?: string) => void) {
@@ -81,7 +102,7 @@ export class BleService {
     try {
       this.setStatus('connecting');
 
-      // Intentamos emparejar con filtro para SumoBot o cualquier dispositivo con el servicio
+      // Intentamos emparejar con filtro para SumoBot o con cualquier dispositivo con el servicio
       this.device = await navigator.bluetooth!.requestDevice({
         filters: [
           { namePrefix: 'SumoBot' },
@@ -89,7 +110,6 @@ export class BleService {
         ],
         optionalServices: [SERVICE_UUID],
       }).catch(async (err: any) => {
-        // Fallback: mostrar todos los dispositivos si no encuentra por filtro exacto
         if (err && err.name === 'NotFoundError') {
           throw err;
         }
@@ -116,7 +136,7 @@ export class BleService {
       this.characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
 
       this.setStatus('connected');
-      this.startHeartbeat();
+      this.startThrottleLoop();
       this.notifyTelemetry();
       return true;
     } catch (error: unknown) {
@@ -132,16 +152,16 @@ export class BleService {
   }
 
   private handleDisconnection = () => {
+    this.stopThrottleLoop();
     this.device = null;
     this.characteristic = null;
     this.isWriting = false;
-    this.pendingPayload = null;
-    this.stopHeartbeat();
+    this.hasUnsentChanges = false;
     this.setStatus('disconnected', 'Dispositivo desconectado');
   };
 
   public async disconnect() {
-    this.stopHeartbeat();
+    this.stopThrottleLoop();
     if (this.device && this.device.gatt?.connected) {
       this.device.gatt.disconnect();
     }
@@ -149,47 +169,99 @@ export class BleService {
   }
 
   /**
-   * Envía un paquete con Throttling y Mutex (Queue Collapse).
-   * Soluciona el bug de saturación GATT y congelamiento del ESP32.
+   * ACTUALIZACIÓN DE VALORES DESDE LA INTERFAZ TÁCTIL (ZERO-COST, ZERO-NETWORK)
+   * Los eventos táctiles / de puntero SOLO actualizan este estado en memoria.
+   * La transmisión real la gestiona el bucle de Throttling a intervalos fijos.
    */
-  public sendLevers(values: LeverValues) {
-    const payload = `V:${Math.round(values.center)},${Math.round(values.left)},${Math.round(values.right)}\n`;
-    this.queuePayload(payload);
+  public updateLevers(values: LeverValues) {
+    this.latestValues = {
+      center: Math.round(values.center),
+      left: Math.round(values.left),
+      right: Math.round(values.right),
+    };
+    this.hasUnsentChanges = true;
   }
 
-  public sendHeartbeat() {
-    this.queuePayload('H\n');
+  /**
+   * PARADA INMEDIATA DE EMERGENCIA
+   * Si el usuario suelta la palanca o presiona PARADA, forzamos el envío de 0%
+   * de forma prioritaria sin esperar el siguiente tick completo.
+   */
+  public async forceStopImmediate() {
+    this.latestValues = { center: 0, left: 0, right: 0 };
+    this.hasUnsentChanges = true;
+    if (!this.isWriting && this.status === 'connected' && this.characteristic) {
+      await this.transmitPacket('V:0,0,0\n');
+    }
   }
 
-  private queuePayload(payload: string) {
-    if (this.status !== 'connected' || !this.characteristic) {
+  /**
+   * BUCLE DE TRANSMISIÓN CON THROTTLING ESTRICTO (50ms - 100ms)
+   * Previene la saturación del buffer GATT del ESP32 y del navegador.
+   */
+  private startThrottleLoop() {
+    this.stopThrottleLoop();
+
+    this.throttleTimer = window.setInterval(async () => {
+      if (this.status !== 'connected' || !this.characteristic) {
+        return;
+      }
+
+      // 1. CANDADO MUTEX: Si hay una escritura previa aún sin confirmar, omitir este tick.
+      // Esto evita el error DOMException: "GATT operation already in progress".
+      if (this.isWriting) {
+        return;
+      }
+
+      const now = Date.now();
+      const current = this.latestValues;
+      const last = this.lastTransmittedValues;
+
+      // Comprobar si hubo cambios significativos en las palancas
+      const valuesDiffer = (
+        current.center !== last.center ||
+        current.left !== last.left ||
+        current.right !== last.right
+      );
+
+      if (valuesDiffer || this.hasUnsentChanges) {
+        // Enviar trama de control
+        const payload = `V:${current.center},${current.left},${current.right}\n`;
+        this.lastTransmittedValues = { ...current };
+        this.hasUnsentChanges = false;
+        await this.transmitPacket(payload);
+      } else {
+        // Si no hay cambios pero han pasado > 380ms, enviar Heartbeat para mantener vivo el watchdog (1000ms)
+        if (now - this.lastSentTime >= 380) {
+          await this.transmitPacket('H\n');
+        }
+      }
+    }, this.throttleIntervalMs);
+  }
+
+  private stopThrottleLoop() {
+    if (this.throttleTimer !== null) {
+      clearInterval(this.throttleTimer);
+      this.throttleTimer = null;
+    }
+  }
+
+  /**
+   * TRANSMISIÓN DE BAJO NIVEL AL CARACTERÍSTICO BLE
+   */
+  private async transmitPacket(payload: string) {
+    if (!this.characteristic || this.status !== 'connected') {
       return;
     }
 
-    // Actualizamos el paquete pendiente con el más reciente (Queue Collapse)
-    this.pendingPayload = payload;
-
-    // Si ya hay una operación de escritura en curso, esperamos a que termine
-    if (!this.isWriting) {
-      this.flushPendingPayload();
-    }
-  }
-
-  private async flushPendingPayload() {
-    if (!this.pendingPayload || !this.characteristic || this.status !== 'connected') {
-      return;
-    }
-
-    const payload = this.pendingPayload;
-    this.pendingPayload = null;
     this.isWriting = true;
-
     const startTime = performance.now();
+
     try {
       const encoder = new TextEncoder();
       const data = encoder.encode(payload);
 
-      // Usar writeValueWithoutResponse si está disponible para máxima velocidad, o writeValue tradicional
+      // Si está soportado, writeValueWithoutResponse es mucho más rápido y ligero
       if (typeof this.characteristic.writeValueWithoutResponse === 'function') {
         await this.characteristic.writeValueWithoutResponse(data);
       } else {
@@ -208,28 +280,6 @@ export class BleService {
       console.warn('[BLE TX Error]', err);
     } finally {
       this.isWriting = false;
-      // Si mientras escribíamos se generó un nuevo paquete, enviarlo inmediatamente
-      if (this.pendingPayload) {
-        this.flushPendingPayload();
-      }
-    }
-  }
-
-  private startHeartbeat() {
-    this.stopHeartbeat();
-    // Envía un heartbeat ligero cada 400ms para mantener vivo el watchdog (1000ms)
-    this.heartbeatTimer = window.setInterval(() => {
-      const now = Date.now();
-      if (now - this.lastSentTime >= 350) {
-        this.sendHeartbeat();
-      }
-    }, 350);
-  }
-
-  private stopHeartbeat() {
-    if (this.heartbeatTimer !== null) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = null;
     }
   }
 
