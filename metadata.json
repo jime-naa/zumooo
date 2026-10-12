@@ -1,0 +1,6 @@
+{
+  "name": "SumoBot BLE Controller & Firmware",
+  "description": "App de control web Bluetooth (BLE) en orientación horizontal (landscape) con 3 palancas táctiles y firmware C++ completo para robot de sumo ESP32.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
