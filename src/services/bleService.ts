@@ -1,4 +1,4 @@
-import { BleConnectionStatus, BleTelemetry, LeverValues } from '../types';
+import { BleConnectionStatus, BleTelemetry, LeverValues, computeSumoMovement } from '../types';
 
 export const SERVICE_UUID = '4fafc201-1fb5-459e-8fcc-c5c9c331914b';
 export const CHARACTERISTIC_UUID = 'c565818d-6972-466d-88b0-517865f14d02';
@@ -15,7 +15,7 @@ export class BleService {
   private lastTransmittedValues: LeverValues = { center: 0, left: 0, right: 0 };
   private hasUnsentChanges = false;
   private lastSentTime: number = 0;
-  private lastSentPayload: string = 'V:0,0,0';
+  private lastSentPayload: string = 'S 0';
 
   // Métricas y Telemetría
   private packetCount: number = 0;
@@ -102,9 +102,10 @@ export class BleService {
     try {
       this.setStatus('connecting');
 
-      // Intentamos emparejar con filtro para SumoBot o con cualquier dispositivo con el servicio
+      // Intentamos emparejar con filtro para ESP32_Sumo_TB6612 o con cualquier dispositivo con el servicio
       this.device = await navigator.bluetooth!.requestDevice({
         filters: [
+          { namePrefix: 'ESP32_Sumo' },
           { namePrefix: 'SumoBot' },
           { services: [SERVICE_UUID] },
         ],
@@ -124,7 +125,7 @@ export class BleService {
         return false;
       }
 
-      this.deviceName = this.device.name || 'SumoBot-ESP32';
+      this.deviceName = this.device.name || 'ESP32_Sumo_TB6612';
       this.device.addEventListener('gattserverdisconnected', this.handleDisconnection);
 
       const server = await this.device.gatt?.connect();
@@ -184,20 +185,21 @@ export class BleService {
 
   /**
    * PARADA INMEDIATA DE EMERGENCIA
-   * Si el usuario suelta la palanca o presiona PARADA, forzamos el envío de 0%
+   * Si el usuario suelta la palanca o presiona PARADA, forzamos el envío de "S 0\n"
    * de forma prioritaria sin esperar el siguiente tick completo.
    */
   public async forceStopImmediate() {
     this.latestValues = { center: 0, left: 0, right: 0 };
     this.hasUnsentChanges = true;
     if (!this.isWriting && this.status === 'connected' && this.characteristic) {
-      await this.transmitPacket('V:0,0,0\n');
+      await this.transmitPacket('S 0\n');
     }
   }
 
   /**
    * BUCLE DE TRANSMISIÓN CON THROTTLING ESTRICTO (50ms - 100ms)
-   * Previene la saturación del buffer GATT del ESP32 y del navegador.
+   * Envía los comandos en formato "F 255", "R 200", "L 220", "D 220", "S 0"
+   * exactamente como los espera el firmware ESP32 TB6612.
    */
   private startThrottleLoop() {
     this.stopThrottleLoop();
@@ -217,7 +219,7 @@ export class BleService {
       const current = this.latestValues;
       const last = this.lastTransmittedValues;
 
-      // Comprobar si hubo cambios significativos en las palancas
+      // Comprobar si hubo cambios en las palancas
       const valuesDiffer = (
         current.center !== last.center ||
         current.left !== last.left ||
@@ -225,15 +227,17 @@ export class BleService {
       );
 
       if (valuesDiffer || this.hasUnsentChanges) {
-        // Enviar trama de control
-        const payload = `V:${current.center},${current.left},${current.right}\n`;
+        // Calcular comando compatible con el firmware (F, R, L, D, S y velocidad 0-255)
+        const cmd = computeSumoMovement(current);
+        const payload = `${cmd.rawPayload}\n`;
         this.lastTransmittedValues = { ...current };
         this.hasUnsentChanges = false;
         await this.transmitPacket(payload);
       } else {
-        // Si no hay cambios pero han pasado > 380ms, enviar Heartbeat para mantener vivo el watchdog (1000ms)
+        // Si no hay cambios pero han pasado > 380ms, refrescar con S 0 si está detenido
         if (now - this.lastSentTime >= 380) {
-          await this.transmitPacket('H\n');
+          const cmd = computeSumoMovement(current);
+          await this.transmitPacket(`${cmd.rawPayload}\n`);
         }
       }
     }, this.throttleIntervalMs);

@@ -14,7 +14,7 @@ import {
   Sliders
 } from 'lucide-react';
 import { bleService } from './services/bleService';
-import { BleConnectionStatus, BleTelemetry, LeverValues, MotorSpeeds } from './types';
+import { BleConnectionStatus, BleTelemetry, LeverValues, MotorSpeeds, computeSumoMovement } from './types';
 import { LeverControl } from './components/LeverControl';
 import { DohyoSimulator } from './components/DohyoSimulator';
 import { FirmwareModal } from './components/FirmwareModal';
@@ -37,7 +37,7 @@ export default function App() {
   const [telemetry, setTelemetry] = useState<BleTelemetry>({
     packetsSent: 0,
     packetsPerSec: 0,
-    lastPacketPayload: 'V:0,0,0',
+    lastPacketPayload: 'S 0',
     lastLatencyMs: 0,
     bytesSent: 0,
     lastPacketTimestamp: 0,
@@ -53,6 +53,9 @@ export default function App() {
 
   // Watchdog virtual indicador (se reinicia con cada paquete)
   const [watchdogProgress, setWatchdogProgress] = useState(100);
+
+  // Comando de movimiento calculado según la programación del ESP32 ('F', 'R', 'L', 'D', 'S')
+  const currentCmd = computeSumoMovement(levers);
 
   // REGLA DE PRIORIDAD (OVERRIDE):
   // Si las palancas laterales están accionadas (|L| > 3 o |R| > 3),
@@ -398,14 +401,20 @@ export default function App() {
           {/* Header del Centro: Estado de Combate y Aviso de Override */}
           <div className="flex items-center justify-between mb-1.5">
             <div className="flex items-center gap-2">
-              <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider border ${
-                isOverrideActive
-                  ? 'bg-amber-950/80 border-amber-600 text-amber-300 animate-pulse'
-                  : levers.center !== 0
-                    ? 'bg-cyan-950/80 border-cyan-500 text-cyan-300'
-                    : 'bg-slate-800 border-slate-700 text-slate-400'
+              <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider border transition-colors ${
+                currentCmd.dir === 'F'
+                  ? 'bg-emerald-950/90 border-emerald-500 text-emerald-300 shadow-sm shadow-emerald-500/20'
+                  : currentCmd.dir === 'R'
+                    ? 'bg-amber-950/90 border-amber-500 text-amber-300 shadow-sm shadow-amber-500/20'
+                    : currentCmd.dir === 'L'
+                      ? 'bg-cyan-950/90 border-cyan-500 text-cyan-300 shadow-sm shadow-cyan-500/20'
+                      : currentCmd.dir === 'D'
+                        ? 'bg-blue-950/90 border-blue-500 text-blue-300 shadow-sm shadow-blue-500/20'
+                        : 'bg-slate-800/80 border-slate-700 text-slate-400'
               }`}>
-                {isOverrideActive ? 'PRIORIDAD DIFERENCIAL ACTIVA' : 'AVANCE RECTILÍNEO'}
+                {currentCmd.dir === 'S' 
+                  ? 'MOTORES EN REPOSO (S 0)' 
+                  : `${currentCmd.label} (${currentCmd.rawPayload})`}
               </span>
             </div>
 
@@ -415,7 +424,7 @@ export default function App() {
               className="px-2.5 py-1 rounded bg-rose-600/80 hover:bg-rose-500 text-white font-mono text-[10px] font-bold flex items-center gap-1 transition-transform active:scale-95 shadow"
             >
               <RotateCcw className="w-3 h-3" />
-              PARADA (0%)
+              PARADA (S 0)
             </button>
           </div>
 
@@ -505,7 +514,7 @@ export default function App() {
             <div className="p-1 rounded bg-slate-950/70 border border-slate-800">
               <span className="text-slate-500 block text-[9px]">TRAMA BLE</span>
               <span className="text-cyan-300 font-bold truncate block">
-                {telemetry.lastPacketPayload || 'V:0,0,0'}
+                {telemetry.lastPacketPayload || 'S 0'}
               </span>
             </div>
             <div className="p-1 rounded bg-slate-950/70 border border-slate-800">

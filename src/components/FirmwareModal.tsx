@@ -7,298 +7,211 @@ interface FirmwareModalProps {
   onClose: () => void;
 }
 
-const ESP32_CODE = `/**
- * ============================================================================
- * PROYECTO: ROBOT DE SUMO BLE - FIRMWARE ESP32 DE ALTO RENDIMIENTO
- * ============================================================================
- * Arquitectura de Control Inalámbrico de Baja Latencia, FSM sin Bloqueos,
- * Anti-Congelamiento BLE, Protección Anticaída Dohyo y Rampas de Aceleración.
- * ============================================================================
- */
-
-#include <Arduino.h>
+const ESP32_CODE = `#include <Arduino.h>
 #include <BLEDevice.h>
-#include <BLEServer.h>
 #include <BLEUtils.h>
-#include <BLE2902.h>
+#include <BLEServer.h>
 
-#define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
-#define CHARACTERISTIC_UUID "c565818d-6972-466d-88b0-517865f14d02"
-#define DEVICE_NAME         "SumoBot-ESP32"
+// UUIDs para el servidor BLE
+#define SERVICE_UUID              "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define MOTOR_CHARACTERISTIC_UUID "c565818d-6972-466d-88b0-517865f14d02"
 
-// --- PINES DE CONTROL ---
-// Driver TB6612FNG
-const int PIN_PWMA = 18;  // PWM Motor Izquierdo
-const int PIN_AIN1 = 19;  // Dir 1 Motor Izquierdo
-const int PIN_AIN2 = 21;  // Dir 2 Motor Izquierdo
-const int PIN_PWMB = 23;  // PWM Motor Derecho
-const int PIN_BIN1 = 22;  // Dir 1 Motor Derecho
-const int PIN_BIN2 = 25;  // Dir 2 Motor Derecho
-const int PIN_STBY = 5;   // Standby (HIGH = Activo)
+// --- PINES DRIVER TB6612FNG (Según tu esquema) ---
+const int pinPWMA = 25;
+const int pinAIN2 = 27;
+const int pinAIN1 = 26;
+const int pinSTBY = 33;
 
-// Sensores IR TCRT5000 (Dohyo Border)
-const int PIN_IR_FRONT = 32; // Sensor Frontal
-const int PIN_IR_REAR  = 33; // Sensor Trasero
-const int PIN_LED      = 2;  // LED Status
+// NOTA: Si BIN1 está en GPIO 34, cambiar a GPIO 14 o 32 para que funcione la salida
+const int pinBIN1 = 14; 
+const int pinBIN2 = 12;
+const int pinPWMB = 13;
 
-const int LINE_DETECTED_LEVEL = LOW; 
+// --- PINES SENSORES INFRARROJOS DE LÍNEA ---
+const int SENSOR_ADELANTE = 35; 
+const int SENSOR_ATRAS    = 34; 
 
-// --- PARÁMETROS PWM ---
-const int PWM_FREQ       = 20000;
-const int PWM_RESOLUTION = 8;
-const int PWM_CH_LEFT    = 0;
-const int PWM_CH_RIGHT   = 1;
+// Variables globales
+char direccionActual = 'S';
+int velocidadActual = 0;
 
-// --- TIEMPOS Y FAILSAFES ---
-const unsigned long WATCHDOG_TIMEOUT_MS  = 1000; // Watchdog 1s
-const unsigned long LINE_ESCAPE_TIME_MS  = 800;  // 800ms escape
-const unsigned long RAMP_INTERVAL_MS     = 10;
-const int           RAMP_STEP            = 18;
+// Declaración de funciones
+void aplicarMovimiento(char dir, int speed);
+void evitarCaidaAdelante();
+void evitarCaidaAtras();
+void detenerMotores();
 
-enum RobotState {
-  STATE_DISCONNECTED,
-  STATE_MANUAL_BLE,
-  STATE_LINE_FRONT_ESCAPE,
-  STATE_LINE_REAR_ESCAPE,
-  STATE_FAILSAFE_TIMEOUT
-};
+// --- CALLBACK BLE ---
+class SumoCallbacks: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pChar) override {
+        std::string rxVal = pChar->getValue();
+        String val = String(rxVal.c_str());
 
-RobotState currentState = STATE_DISCONNECTED;
+        if (val.length() > 0) {
+            direccionActual = val[0];
+            velocidadActual = (val.length() > 2) ? val.substring(2).toInt() : 0;
+            velocidadActual = constrain(velocidadActual, 0, 255);
 
-// --- ESTRUCTURA ATÓMICA BLE (ZERO-LOCK) ---
-#define RX_BUFFER_SIZE 64
-volatile char rawRxBuffer[RX_BUFFER_SIZE];
-volatile bool newPacketAvailable = false;
-portMUX_TYPE bleMux = portMUX_INITIALIZER_UNLOCKED;
-
-bool deviceConnected = false;
-bool oldDeviceConnected = false;
-unsigned long lastPacketTime = 0;
-unsigned long lineEscapeStartTime = 0;
-
-int targetSpeedL = 0;
-int targetSpeedR = 0;
-int currentSpeedL = 0;
-int currentSpeedR = 0;
-unsigned long lastRampTime = 0;
-
-BLEServer* pServer = nullptr;
-BLECharacteristic* pCharacteristic = nullptr;
-
-class MyServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer* pServer) override {
-    deviceConnected = true;
-    lastPacketTime = millis();
-    digitalWrite(PIN_LED, HIGH);
-  }
-
-  void onDisconnect(BLEServer* pServer) override {
-    deviceConnected = false;
-    digitalWrite(PIN_LED, LOW);
-  }
-};
-
-// --- CALLBACK ONWRITE DE ALTA VELOCIDAD (SOLUCIÓN CRÍTICA AL BUG) ---
-class MyCharacteristicCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic *pChar) override {
-    std::string rxValue = pChar->getValue();
-    size_t len = rxValue.length();
-    if (len > 0 && len < RX_BUFFER_SIZE) {
-      portENTER_CRITICAL_ISR(&bleMux);
-      memcpy((void*)rawRxBuffer, rxValue.data(), len);
-      rawRxBuffer[len] = '\\0';
-      newPacketAvailable = true;
-      portEXIT_CRITICAL_ISR(&bleMux);
+            Serial.print("Comando BLE: ");
+            Serial.print(direccionActual);
+            Serial.print(" | Velocidad: ");
+            Serial.println(velocidadActual);
+        }
     }
-  }
 };
-
-void setMotorOutputs(int speedL, int speedR) {
-  digitalWrite(PIN_STBY, HIGH);
-  // Izquierdo
-  digitalWrite(PIN_AIN1, speedL > 0 ? HIGH : LOW);
-  digitalWrite(PIN_AIN2, speedL < 0 ? HIGH : LOW);
-  ledcWrite(PWM_CH_LEFT, constrain(abs(speedL), 0, 255));
-
-  // Derecho
-  digitalWrite(PIN_BIN1, speedR > 0 ? HIGH : LOW);
-  digitalWrite(PIN_BIN2, speedR < 0 ? HIGH : LOW);
-  ledcWrite(PWM_CH_RIGHT, constrain(abs(speedR), 0, 255));
-}
-
-void stopMotorsImmediate() {
-  targetSpeedL = 0; targetSpeedR = 0;
-  currentSpeedL = 0; currentSpeedR = 0;
-  setMotorOutputs(0, 0);
-}
-
-void updateMotorRamps(bool forceImmediate = false) {
-  unsigned long now = millis();
-  if (forceImmediate) {
-    currentSpeedL = targetSpeedL;
-    currentSpeedR = targetSpeedR;
-    setMotorOutputs(currentSpeedL, currentSpeedR);
-    return;
-  }
-  if (now - lastRampTime >= RAMP_INTERVAL_MS) {
-    lastRampTime = now;
-    if (currentSpeedL < targetSpeedL) currentSpeedL = min(currentSpeedL + RAMP_STEP, targetSpeedL);
-    else if (currentSpeedL > targetSpeedL) currentSpeedL = max(currentSpeedL - RAMP_STEP, targetSpeedL);
-
-    if (currentSpeedR < targetSpeedR) currentSpeedR = min(currentSpeedR + RAMP_STEP, targetSpeedR);
-    else if (currentSpeedR > targetSpeedR) currentSpeedR = max(currentSpeedR - RAMP_STEP, targetSpeedR);
-
-    setMotorOutputs(currentSpeedL, currentSpeedR);
-  }
-}
-
-void parseCommandPacket(const char* packet) {
-  if (!packet || packet[0] == '\\0') return;
-  if (packet[0] == 'H') { lastPacketTime = millis(); return; }
-
-  if (packet[0] == 'V' && packet[1] == ':') {
-    int center = 0, leftStick = 0, rightStick = 0;
-    if (sscanf(packet + 2, "%d,%d,%d", &center, &leftStick, &rightStick) >= 1) {
-      lastPacketTime = millis();
-      // Regla de Prioridad (Override): Las palancas laterales anulan la central
-      if (abs(leftStick) > 3 || abs(rightStick) > 3) {
-        targetSpeedL = map(constrain(leftStick, -100, 100), -100, 100, -255, 255);
-        targetSpeedR = map(constrain(rightStick, -100, 100), -100, 100, -255, 255);
-      } else {
-        int pwmCenter = map(constrain(center, -100, 100), -100, 100, -255, 255);
-        targetSpeedL = pwmCenter;
-        targetSpeedR = pwmCenter;
-      }
-    }
-  }
-}
 
 void setup() {
-  Serial.begin(115200);
-  pinMode(PIN_AIN1, OUTPUT); pinMode(PIN_AIN2, OUTPUT);
-  pinMode(PIN_BIN1, OUTPUT); pinMode(PIN_BIN2, OUTPUT);
-  pinMode(PIN_STBY, OUTPUT); digitalWrite(PIN_STBY, HIGH);
+    Serial.begin(115200);
 
-  ledcSetup(PWM_CH_LEFT, PWM_FREQ, PWM_RESOLUTION);
-  ledcAttachPin(PIN_PWMA, PWM_CH_LEFT);
-  ledcSetup(PWM_CH_RIGHT, PWM_FREQ, PWM_RESOLUTION);
-  ledcAttachPin(PIN_PWMB, PWM_CH_RIGHT);
+    // Configurar pines del Driver TB6612FNG como Salidas
+    pinMode(pinPWMA, OUTPUT);
+    pinMode(pinAIN1, OUTPUT);
+    pinMode(pinAIN2, OUTPUT);
+    pinMode(pinSTBY, OUTPUT);
+    pinMode(pinBIN1, OUTPUT);
+    pinMode(pinBIN2, OUTPUT);
+    pinMode(pinPWMB, OUTPUT);
 
-  pinMode(PIN_IR_FRONT, INPUT_PULLUP);
-  pinMode(PIN_IR_REAR,  INPUT_PULLUP);
-  pinMode(PIN_LED, OUTPUT);
-  stopMotorsImmediate();
+    // Activar el Driver TB6612FNG (STBY en HIGH)
+    digitalWrite(pinSTBY, HIGH);
 
-  BLEDevice::init(DEVICE_NAME);
-  pServer = BLEDevice::createServer();
-  pServer->setCallbacks(new MyServerCallbacks());
+    // Configurar Sensores de Borde
+    pinMode(SENSOR_ADELANTE, INPUT_PULLUP);
+    pinMode(SENSOR_ATRAS, INPUT_PULLUP);
 
-  BLEService *pService = pServer->createService(SERVICE_UUID);
-  pCharacteristic = pService->createCharacteristic(
-                      CHARACTERISTIC_UUID,
-                      BLECharacteristic::PROPERTY_READ   |
-                      BLECharacteristic::PROPERTY_WRITE  |
-                      BLECharacteristic::PROPERTY_WRITE_NR |
-                      BLECharacteristic::PROPERTY_NOTIFY
-                    );
-  pCharacteristic->setCallbacks(new MyCharacteristicCallbacks());
-  pCharacteristic->addDescriptor(new BLE2902());
-  pService->start();
+    detenerMotores();
 
-  BLEAdvertising *pAdv = BLEDevice::getAdvertising();
-  pAdv->addServiceUUID(SERVICE_UUID);
-  pAdv->setScanResponse(true);
-  BLEDevice::startAdvertising();
-  Serial.println("[SUMOBOT] BLE Activo y Publicando.");
+    // Inicializar BLE
+    BLEDevice::init("ESP32_Sumo_TB6612");
+    BLEServer *pServer = BLEDevice::createServer();
+    BLEService *pService = pServer->createService(SERVICE_UUID);
+
+    BLECharacteristic *pMotorChar = pService->createCharacteristic(
+        MOTOR_CHARACTERISTIC_UUID,
+        BLECharacteristic::PROPERTY_WRITE
+    );
+
+    pMotorChar->setCallbacks(new SumoCallbacks());
+    pService->start();
+
+    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->addServiceUUID(SERVICE_UUID);
+    pAdvertising->start();
+
+    Serial.println("==========================================");
+    Serial.println(" ESP32 Sumo Listo con TB6612FNG - BLE Active ");
+    Serial.println("==========================================");
 }
 
 void loop() {
-  unsigned long now = millis();
+    // 1. PRIORIDAD DE SEGURIDAD (Sensores en el Ring)
+    bool lineaAdelante = (digitalRead(SENSOR_ADELANTE) == LOW);
+    bool lineaAtras    = (digitalRead(SENSOR_ATRAS) == LOW);
 
-  if (!deviceConnected && oldDeviceConnected) {
+    if (lineaAdelante) {
+        Serial.println("¡ALERTA FRONTAL! Borde detectado.");
+        evitarCaidaAdelante();
+        return;
+    }
+ 
+    if (lineaAtras) {
+        Serial.println("¡ALERTA TRASERA! Borde detectado.");
+        evitarCaidaAtras();
+        return;
+    }
+
+    // 2. CONTROL MANUAL POR APP
+    aplicarMovimiento(direccionActual, velocidadActual);
+
+    delay(20);
+}
+
+// --- CONTROL TB6612FNG ---
+void aplicarMovimiento(char dir, int speed) {
+    digitalWrite(pinSTBY, HIGH); // Asegurar que el driver esté activo
+
+    switch (dir) {
+        case 'F': // Adelante
+            digitalWrite(pinAIN1, HIGH);
+            digitalWrite(pinAIN2, LOW);
+            digitalWrite(pinBIN1, HIGH);
+            digitalWrite(pinBIN2, LOW);
+            analogWrite(pinPWMA, speed);
+            analogWrite(pinPWMB, speed);
+            break;
+
+        case 'R': // Atrás
+            digitalWrite(pinAIN1, LOW);
+            digitalWrite(pinAIN2, HIGH);
+            digitalWrite(pinBIN1, LOW);
+            digitalWrite(pinBIN2, HIGH);
+            analogWrite(pinPWMA, speed);
+            analogWrite(pinPWMB, speed);
+            break;
+
+        case 'L': // Giro Izquierda
+            digitalWrite(pinAIN1, LOW);
+            digitalWrite(pinAIN2, HIGH);
+            digitalWrite(pinBIN1, HIGH);
+            digitalWrite(pinBIN2, LOW);
+            analogWrite(pinPWMA, speed);
+            analogWrite(pinPWMB, speed);
+            break;
+
+        case 'D': // Giro Derecha
+            digitalWrite(pinAIN1, HIGH);
+            digitalWrite(pinAIN2, LOW);
+            digitalWrite(pinBIN1, LOW);
+            digitalWrite(pinBIN2, HIGH);
+            analogWrite(pinPWMA, speed);
+            analogWrite(pinPWMB, speed);
+            break;
+
+        case 'S': // Detener
+        default:
+            detenerMotores();
+            break;
+    }
+}
+
+void detenerMotores() {
+    digitalWrite(pinAIN1, LOW);
+    digitalWrite(pinAIN2, LOW);
+    digitalWrite(pinBIN1, LOW);
+    digitalWrite(pinBIN2, LOW);
+    analogWrite(pinPWMA, 0);
+    analogWrite(pinPWMB, 0);
+}
+
+// --- EVASIÓN AUTOMÁTICA ---
+void evitarCaidaAdelante() {
+    detenerMotores();
+    delay(50);
+
+    aplicarMovimiento('R', 255);
     delay(500);
-    pServer->startAdvertising();
-    oldDeviceConnected = deviceConnected;
-    currentState = STATE_DISCONNECTED;
-    stopMotorsImmediate();
-  }
-  if (deviceConnected && !oldDeviceConnected) {
-    oldDeviceConnected = deviceConnected;
-    currentState = STATE_MANUAL_BLE;
-    lastPacketTime = now;
-  }
 
-  char localPacket[RX_BUFFER_SIZE];
-  bool hasPacket = false;
-  if (newPacketAvailable) {
-    portENTER_CRITICAL(&bleMux);
-    strncpy(localPacket, (const char*)rawRxBuffer, RX_BUFFER_SIZE - 1);
-    localPacket[RX_BUFFER_SIZE - 1] = '\\0';
-    newPacketAvailable = false;
-    hasPacket = true;
-    portEXIT_CRITICAL(&bleMux);
-  }
+    aplicarMovimiento('D', 220);
+    delay(350);
 
-  bool frontLine = (digitalRead(PIN_IR_FRONT) == LINE_DETECTED_LEVEL);
-  bool rearLine  = (digitalRead(PIN_IR_REAR)  == LINE_DETECTED_LEVEL);
+    detenerMotores();
+    direccionActual = 'S';
+    velocidadActual = 0;
+}
 
-  switch (currentState) {
-    case STATE_DISCONNECTED:
-      stopMotorsImmediate();
-      break;
+void evitarCaidaAtras() {
+    detenerMotores();
+    delay(50);
 
-    case STATE_MANUAL_BLE:
-      if (frontLine) {
-        currentState = STATE_LINE_FRONT_ESCAPE;
-        lineEscapeStartTime = now;
-        targetSpeedL = -255; targetSpeedR = -255;
-        updateMotorRamps(true);
-        break;
-      }
-      if (rearLine) {
-        currentState = STATE_LINE_REAR_ESCAPE;
-        lineEscapeStartTime = now;
-        targetSpeedL = 255; targetSpeedR = 255;
-        updateMotorRamps(true);
-        break;
-      }
-      if (now - lastPacketTime > WATCHDOG_TIMEOUT_MS) {
-        currentState = STATE_FAILSAFE_TIMEOUT;
-        stopMotorsImmediate();
-        break;
-      }
-      if (hasPacket) parseCommandPacket(localPacket);
-      updateMotorRamps(false);
-      break;
+    aplicarMovimiento('F', 255);
+    delay(500);
 
-    case STATE_LINE_FRONT_ESCAPE:
-      targetSpeedL = -255; targetSpeedR = -255;
-      setMotorOutputs(-255, -255);
-      if (now - lineEscapeStartTime >= LINE_ESCAPE_TIME_MS) {
-        currentState = STATE_MANUAL_BLE;
-        lastPacketTime = now;
-        targetSpeedL = 0; targetSpeedR = 0;
-      }
-      break;
+    aplicarMovimiento('L', 220);
+    delay(350);
 
-    case STATE_LINE_REAR_ESCAPE:
-      targetSpeedL = 255; targetSpeedR = 255;
-      setMotorOutputs(255, 255);
-      if (now - lineEscapeStartTime >= LINE_ESCAPE_TIME_MS) {
-        currentState = STATE_MANUAL_BLE;
-        lastPacketTime = now;
-        targetSpeedL = 0; targetSpeedR = 0;
-      }
-      break;
-
-    case STATE_FAILSAFE_TIMEOUT:
-      stopMotorsImmediate();
-      if (hasPacket) {
-        parseCommandPacket(localPacket);
-        currentState = STATE_MANUAL_BLE;
-      }
-      break;
-  }
+    detenerMotores();
+    direccionActual = 'S';
+    velocidadActual = 0;
 }`;
 
 export const FirmwareModal: React.FC<FirmwareModalProps> = ({ isOpen, onClose }) => {
@@ -445,55 +358,55 @@ export const FirmwareModal: React.FC<FirmwareModalProps> = ({ isOpen, onClose })
                       <tr>
                         <td className="py-2 px-3 font-semibold text-cyan-400">TB6612FNG</td>
                         <td className="py-2 px-3">PWMA</td>
-                        <td className="py-2 px-3 text-cyan-300 font-bold">GPIO 18</td>
+                        <td className="py-2 px-3 text-cyan-300 font-bold">GPIO 25</td>
                         <td className="py-2 px-3 font-sans text-slate-400">PWM Velocidad Motor Izquierdo</td>
                       </tr>
                       <tr>
                         <td className="py-2 px-3 font-semibold text-cyan-400">TB6612FNG</td>
                         <td className="py-2 px-3">AIN1</td>
-                        <td className="py-2 px-3 text-cyan-300 font-bold">GPIO 19</td>
+                        <td className="py-2 px-3 text-cyan-300 font-bold">GPIO 26</td>
                         <td className="py-2 px-3 font-sans text-slate-400">Sentido Avance Motor Izquierdo</td>
                       </tr>
                       <tr>
                         <td className="py-2 px-3 font-semibold text-cyan-400">TB6612FNG</td>
                         <td className="py-2 px-3">AIN2</td>
-                        <td className="py-2 px-3 text-cyan-300 font-bold">GPIO 21</td>
+                        <td className="py-2 px-3 text-cyan-300 font-bold">GPIO 27</td>
                         <td className="py-2 px-3 font-sans text-slate-400">Sentido Reversa Motor Izquierdo</td>
                       </tr>
                       <tr>
                         <td className="py-2 px-3 font-semibold text-cyan-400">TB6612FNG</td>
-                        <td className="py-2 px-3">PWMB</td>
-                        <td className="py-2 px-3 text-cyan-300 font-bold">GPIO 23</td>
-                        <td className="py-2 px-3 font-sans text-slate-400">PWM Velocidad Motor Derecho</td>
+                        <td className="py-2 px-3">STBY</td>
+                        <td className="py-2 px-3 text-cyan-300 font-bold">GPIO 33</td>
+                        <td className="py-2 px-3 font-sans text-slate-400">Habilitador Standby (HIGH = Activo)</td>
                       </tr>
                       <tr>
                         <td className="py-2 px-3 font-semibold text-cyan-400">TB6612FNG</td>
                         <td className="py-2 px-3">BIN1</td>
-                        <td className="py-2 px-3 text-cyan-300 font-bold">GPIO 22</td>
+                        <td className="py-2 px-3 text-cyan-300 font-bold">GPIO 14 (o 32)</td>
                         <td className="py-2 px-3 font-sans text-slate-400">Sentido Avance Motor Derecho</td>
                       </tr>
                       <tr>
                         <td className="py-2 px-3 font-semibold text-cyan-400">TB6612FNG</td>
                         <td className="py-2 px-3">BIN2</td>
-                        <td className="py-2 px-3 text-cyan-300 font-bold">GPIO 25</td>
+                        <td className="py-2 px-3 text-cyan-300 font-bold">GPIO 12</td>
                         <td className="py-2 px-3 font-sans text-slate-400">Sentido Reversa Motor Derecho</td>
                       </tr>
                       <tr>
                         <td className="py-2 px-3 font-semibold text-cyan-400">TB6612FNG</td>
-                        <td className="py-2 px-3">STBY</td>
-                        <td className="py-2 px-3 text-cyan-300 font-bold">GPIO 5</td>
-                        <td className="py-2 px-3 font-sans text-slate-400">Habilitador de salida (HIGH)</td>
+                        <td className="py-2 px-3">PWMB</td>
+                        <td className="py-2 px-3 text-cyan-300 font-bold">GPIO 13</td>
+                        <td className="py-2 px-3 font-sans text-slate-400">PWM Velocidad Motor Derecho</td>
                       </tr>
                       <tr>
                         <td className="py-2 px-3 font-semibold text-amber-400">TCRT5000 IR</td>
-                        <td className="py-2 px-3">D0 (Frontal)</td>
-                        <td className="py-2 px-3 text-amber-300 font-bold">GPIO 32</td>
+                        <td className="py-2 px-3">SENSOR_ADELANTE</td>
+                        <td className="py-2 px-3 text-amber-300 font-bold">GPIO 35</td>
                         <td className="py-2 px-3 font-sans text-slate-400">Detección borde blanco frontal</td>
                       </tr>
                       <tr>
                         <td className="py-2 px-3 font-semibold text-amber-400">TCRT5000 IR</td>
-                        <td className="py-2 px-3">D0 (Trasero)</td>
-                        <td className="py-2 px-3 text-amber-300 font-bold">GPIO 33</td>
+                        <td className="py-2 px-3">SENSOR_ATRAS</td>
+                        <td className="py-2 px-3 text-amber-300 font-bold">GPIO 34</td>
                         <td className="py-2 px-3 font-sans text-slate-400">Detección borde blanco trasero</td>
                       </tr>
                       <tr>
