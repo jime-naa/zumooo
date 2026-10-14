@@ -316,38 +316,39 @@ export default function App() {
             {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
           </button>
 
-          {/* Botón Principal BLE */}
+          {/* Botón Principal BLE Ultra-Visible */}
           <button
             onClick={toggleBleConnection}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all shadow-sm ${
+            className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-2 transition-all shadow-md active:scale-95 ${
               bleStatus === 'connected'
-                ? 'bg-emerald-600 hover:bg-rose-700 text-white shadow-emerald-600/30'
+                ? 'bg-emerald-600 hover:bg-rose-700 text-white shadow-emerald-500/30 border border-emerald-400/50'
                 : bleStatus === 'connecting'
-                  ? 'bg-amber-600 text-white animate-pulse'
+                  ? 'bg-amber-600 text-white animate-pulse shadow-amber-500/30 border border-amber-400/50'
                   : bleStatus === 'unsupported'
                     ? 'bg-slate-800 text-slate-400 cursor-not-allowed border border-slate-700'
-                    : 'bg-cyan-600 hover:bg-cyan-500 text-white shadow-cyan-600/30'
+                    : 'bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white shadow-cyan-500/40 border border-cyan-400/60 ring-2 ring-cyan-500/20 animate-pulse'
             }`}
+            title="Conectar o desconectar ESP32 por Bluetooth BLE"
           >
             {bleStatus === 'connected' ? (
               <>
-                <BluetoothConnected className="w-3.5 h-3.5" />
-                <span>Conectado</span>
+                <BluetoothConnected className="w-4 h-4 text-emerald-200" />
+                <span className="font-display tracking-wide uppercase">Desconectar</span>
               </>
             ) : bleStatus === 'connecting' ? (
               <>
-                <Bluetooth className="w-3.5 h-3.5 animate-spin" />
-                <span>Buscando...</span>
+                <Bluetooth className="w-4 h-4 animate-spin text-amber-200" />
+                <span className="font-display tracking-wide uppercase">Buscando ESP32...</span>
               </>
             ) : bleStatus === 'unsupported' ? (
               <>
-                <BluetoothOff className="w-3.5 h-3.5" />
+                <BluetoothOff className="w-4 h-4" />
                 <span>Sin Web BLE</span>
               </>
             ) : (
               <>
-                <Bluetooth className="w-3.5 h-3.5" />
-                <span>Emparejar BLE</span>
+                <Bluetooth className="w-4 h-4 text-cyan-200 animate-bounce" />
+                <span className="font-display tracking-wider uppercase">Conectar ESP32</span>
               </>
             )}
           </button>
@@ -395,7 +396,7 @@ export default function App() {
         <section className="col-span-6 sm:col-span-6 flex flex-col justify-between p-2 md:p-3 rounded-2xl bg-slate-900/60 border border-slate-800 shadow-xl overflow-y-auto">
           
           {/* Header del Centro: Estado de Combate y Aviso de Override */}
-          <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center justify-between mb-1.5">
             <div className="flex items-center gap-2">
               <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider border ${
                 isOverrideActive
@@ -417,6 +418,60 @@ export default function App() {
               PARADA (0%)
             </button>
           </div>
+
+          {/* BOTÓN PRINCIPAL DE CONEXIÓN BLUETOOTH (ULTRA-VISIBLE EN EL CENTRO) */}
+          {bleStatus !== 'connected' ? (
+            <button
+              onClick={toggleBleConnection}
+              className={`w-full mb-2 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow-lg transition-all active:scale-[0.98] border ${
+                bleStatus === 'connecting'
+                  ? 'bg-amber-600 text-white border-amber-400 shadow-amber-500/20 animate-pulse'
+                  : bleStatus === 'unsupported'
+                    ? 'bg-slate-800 text-slate-400 border-slate-700 cursor-not-allowed'
+                    : 'bg-gradient-to-r from-cyan-600 via-blue-600 to-cyan-500 hover:from-cyan-500 hover:to-blue-400 text-white border-cyan-300/40 shadow-cyan-500/30 animate-pulse'
+              }`}
+            >
+              {bleStatus === 'connecting' ? (
+                <>
+                  <Bluetooth className="w-4 h-4 animate-spin text-amber-200" />
+                  <span className="font-display tracking-wider uppercase">
+                    Buscando ESP32... (Selecciona tu robot en el cuadro)
+                  </span>
+                </>
+              ) : bleStatus === 'unsupported' ? (
+                <>
+                  <BluetoothOff className="w-4 h-4 text-slate-400" />
+                  <span>Tu navegador no soporta Web Bluetooth (Usa Chrome o Edge)</span>
+                </>
+              ) : (
+                <>
+                  <Bluetooth className="w-4 h-4 text-cyan-200 animate-bounce" />
+                  <span className="font-display tracking-wider uppercase text-[11px] sm:text-xs">
+                    ⚡ Conectar Robot ESP32 por Bluetooth
+                  </span>
+                </>
+              )}
+            </button>
+          ) : (
+            <div className="w-full mb-2 py-1 px-3 rounded-xl bg-emerald-950/70 border border-emerald-500/50 text-emerald-200 text-xs flex items-center justify-between shadow-sm">
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                <span className="font-mono text-[11px] font-semibold text-emerald-300">
+                  ESP32 CONECTADO: {telemetry.deviceName || 'SumoBot-ESP32'}
+                </span>
+                <span className="text-[10px] text-emerald-400/80 font-sans hidden sm:inline">
+                  · Listo para mover las palancas
+                </span>
+              </div>
+              <button
+                onClick={toggleBleConnection}
+                className="text-[10px] font-mono text-rose-300 hover:text-white bg-rose-950/80 hover:bg-rose-900 px-2 py-0.5 rounded border border-rose-800 transition-colors"
+                title="Desconectar Bluetooth"
+              >
+                Desconectar
+              </button>
+            </div>
+          )}
 
           {/* Área Central: Simulador de Dohyo y Palanca Central */}
           <div className="flex-1 flex items-center justify-around gap-2 my-1">

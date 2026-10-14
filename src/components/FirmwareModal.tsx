@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Download, Copy, Check, X, Cpu, ShieldCheck, Zap, AlertTriangle, Layers } from 'lucide-react';
-import { SERVICE_UUID } from '../services/bleService';
+import { SERVICE_UUID, CHARACTERISTIC_UUID } from '../services/bleService';
 
 interface FirmwareModalProps {
   isOpen: boolean;
@@ -23,7 +23,7 @@ const ESP32_CODE = `/**
 #include <BLE2902.h>
 
 #define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
-#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+#define CHARACTERISTIC_UUID "c565818d-6972-466d-88b0-517865f14d02"
 #define DEVICE_NAME         "SumoBot-ESP32"
 
 // --- PINES DE CONTROL ---
@@ -554,11 +554,15 @@ export const FirmwareModal: React.FC<FirmwareModalProps> = ({ isOpen, onClose })
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between px-5 py-3 border-t border-slate-800 bg-slate-950 text-xs text-slate-400">
-          <span>Servicio BLE: {SERVICE_UUID.substring(0, 18)}...</span>
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 px-5 py-3 border-t border-slate-800 bg-slate-950 text-xs text-slate-400">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-3 font-mono text-[11px]">
+            <span>Servicio: <strong className="text-cyan-300">{SERVICE_UUID}</strong></span>
+            <span className="hidden sm:inline text-slate-600">·</span>
+            <span>Característica: <strong className="text-cyan-300">{CHARACTERISTIC_UUID}</strong></span>
+          </div>
           <button
             onClick={onClose}
-            className="px-4 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 transition-colors"
+            className="px-4 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 transition-colors shrink-0"
           >
             Cerrar
           </button>
