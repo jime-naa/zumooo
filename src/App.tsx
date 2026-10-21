@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   Bluetooth, 
   BluetoothConnected, 
@@ -13,17 +13,34 @@ import {
   Gauge,
   Sliders,
   Zap,
-  Timer
+  Timer,
+  Swords,
+  Octagon,
+  Volume2,
+  VolumeX,
+  FileCode,
+  Sparkles,
+  Info
 } from 'lucide-react';
 import { bleService } from './services/bleService';
-import { BleConnectionStatus, BleTelemetry, LeverValues, MotorSpeeds, computeSumoMovement } from './types';
+import { soundEffects } from './services/soundEffects';
+import { BleConnectionStatus, BleTelemetry, LeverValues, MotorSpeeds, MovementDir, computeSumoMovement } from './types';
+import { DirectionalPad } from './components/DirectionalPad';
 import { LeverControl } from './components/LeverControl';
 import { DohyoSimulator } from './components/DohyoSimulator';
 import { FirmwareModal } from './components/FirmwareModal';
-import { LandscapeHelper } from './components/LandscapeHelper';
 
 export default function App() {
-  // Estado de las 3 Palancas Virtuales (-100 a +100)
+  // Modo de Control: 'levers' (3 Palancas virtuales) o 'dpad' (Botones direccionales)
+  const [controlMode, setControlMode] = useState<'levers' | 'dpad'>('levers');
+
+  // Dirección activa en D-Pad ('F', 'R', 'L', 'D', 'S')
+  const [activeDir, setActiveDir] = useState<MovementDir>('S');
+
+  // Control Deslizante de Velocidad PWM (100 a 255)
+  const [speed, setSpeed] = useState<number>(220);
+
+  // Estado de las 3 Palancas Virtuales (-100 a +100) para modo Palancas
   const [levers, setLevers] = useState<LeverValues>({
     center: 0,
     left: 0,
@@ -33,7 +50,7 @@ export default function App() {
   // Intervalo de Throttling configurable (50ms a 100ms)
   const [throttleMs, setThrottleMs] = useState<number>(60);
 
-  // Estado BLE
+  // Estado BLE y Telemetría
   const [bleStatus, setBleStatus] = useState<BleConnectionStatus>(bleService.status);
   const [bleError, setBleError] = useState<string | null>(null);
   const [telemetry, setTelemetry] = useState<BleTelemetry>({
@@ -47,40 +64,24 @@ export default function App() {
     deviceName: null,
   });
 
-  // UI Modals y Modos
+  // UI Modales y Ajustes
   const [isFirmwareOpen, setIsFirmwareOpen] = useState(false);
-  const [showSimulator, setShowSimulator] = useState(true);
+  const [firmwareInitialTab, setFirmwareInitialTab] = useState<'appjsx' | 'packagejson' | 'code' | 'wiring'>('appjsx');
+  const [showSimulator, setShowSimulator] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [snappingEnabled, setSnappingEnabled] = useState(true);
+  const [soundEnabled, setSoundEnabled] = useState(true);
 
-  // Watchdog virtual indicador (se reinicia con cada paquete)
+  // Watchdog virtual indicador
   const [watchdogProgress, setWatchdogProgress] = useState(100);
 
   // Estado del Arranque de Combate ('G') y cuenta regresiva reglamentaria de 3s
   const [combatState, setCombatState] = useState<'idle' | 'countdown' | 'active'>('idle');
   const [countdownSeconds, setCountdownSeconds] = useState<number>(3);
 
-  // Comando de movimiento calculado según la programación del ESP32 ('F', 'R', 'L', 'D', 'S')
-  const currentCmd = computeSumoMovement(levers);
-
-  // REGLA DE PRIORIDAD (OVERRIDE):
-  // Si las palancas laterales están accionadas (|L| > 3 o |R| > 3),
-  // la palanca central se anula automáticamente.
-  const isOverrideActive = Math.abs(levers.left) > 3 || Math.abs(levers.right) > 3;
-
-  // Cálculo de tracción efectiva a motores:
-  const motorSpeeds: MotorSpeeds = isOverrideActive
-    ? { left: levers.left, right: levers.right }
-    : { left: levers.center, right: levers.center };
-
-  // Sincronizar el Throttling en BleService cada vez que cambian las palancas
+  // Sincronizar controlMode en el servicio BLE
   useEffect(() => {
-    bleService.updateLevers({
-      center: isOverrideActive ? 0 : levers.center,
-      left: levers.left,
-      right: levers.right,
-    });
-  }, [levers, isOverrideActive]);
+    bleService.setControlMode(controlMode);
+  }, [controlMode]);
 
   // Suscripción al servicio BLE y a la telemetría
   useEffect(() => {
@@ -100,7 +101,7 @@ export default function App() {
     };
   }, []);
 
-  // Temporizador para simular barra de watchdog en el HUD
+  // Temporizador para barra de watchdog
   useEffect(() => {
     const timer = setInterval(() => {
       setWatchdogProgress((prev) => Math.max(0, prev - 10));
@@ -108,13 +109,58 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
-  // Actualizar intervalo de Throttling (50ms - 100ms)
+  // Control de Throttling
   const handleThrottleChange = (ms: number) => {
     setThrottleMs(ms);
     bleService.setThrottleInterval(ms);
   };
 
-  // Manejadores de palancas individuales (actualizan estado local de inmediato)
+  // MANEJO DE MOVIMIENTOS EN MODO D-PAD
+  const handleDirectionStart = useCallback((dir: MovementDir) => {
+    setActiveDir(dir);
+    if (dir === 'S') {
+      bleService.forceStopImmediate();
+    } else {
+      bleService.setDirectCommand(dir, speed);
+    }
+  }, [speed]);
+
+  const handleDirectionEnd = useCallback(() => {
+    setActiveDir('S');
+    bleService.forceStopImmediate();
+  }, []);
+
+  // Actualizar velocidad en caliente si se mueve en D-Pad
+  const handleSpeedChange = (newSpeed: number) => {
+    setSpeed(newSpeed);
+    if (activeDir !== 'S' && controlMode === 'dpad') {
+      bleService.setDirectCommand(activeDir, newSpeed);
+    }
+  };
+
+  // MANEJO DE PALANCAS EN MODO LEVERS
+  const isOverrideActive = Math.abs(levers.left) > 3 || Math.abs(levers.right) > 3;
+  const currentLeverCmd = computeSumoMovement(levers);
+
+  const motorSpeeds: MotorSpeeds = controlMode === 'dpad'
+    ? {
+        left: activeDir === 'F' ? (speed / 255) * 100 : activeDir === 'R' ? -(speed / 255) * 100 : activeDir === 'L' ? -(speed / 255) * 80 : activeDir === 'D' ? (speed / 255) * 80 : 0,
+        right: activeDir === 'F' ? (speed / 255) * 100 : activeDir === 'R' ? -(speed / 255) * 100 : activeDir === 'L' ? (speed / 255) * 80 : activeDir === 'D' ? -(speed / 255) * 80 : 0,
+      }
+    : isOverrideActive
+    ? { left: levers.left, right: levers.right }
+    : { left: levers.center, right: levers.center };
+
+  useEffect(() => {
+    if (controlMode === 'levers') {
+      bleService.updateLevers({
+        center: isOverrideActive ? 0 : levers.center,
+        left: levers.left,
+        right: levers.right,
+      });
+    }
+  }, [levers, isOverrideActive, controlMode]);
+
   const handleCenterChange = useCallback((val: number) => {
     setLevers((prev) => ({ ...prev, center: val }));
   }, []);
@@ -127,12 +173,15 @@ export default function App() {
     setLevers((prev) => ({ ...prev, right: val }));
   }, []);
 
-  // Arranque de Combate ('G'): Envía 'G' al ESP32 para iniciar el combate
+  // ARRANQUE DE COMBATE ('G'): Envía 'G' al ESP32 para iniciar el combate
   const handleCombatStart = async () => {
     await bleService.sendCombatStart();
     setCombatState('countdown');
     setCountdownSeconds(3);
 
+    if (soundEnabled) {
+      soundEffects.playCountdownBeep();
+    }
     if (typeof navigator !== 'undefined' && navigator.vibrate) {
       try { navigator.vibrate([100, 50, 100]); } catch {}
     }
@@ -145,6 +194,9 @@ export default function App() {
     if (countdownSeconds > 0) {
       const timer = setTimeout(() => {
         setCountdownSeconds((prev) => prev - 1);
+        if (soundEnabled) {
+          soundEffects.playCountdownBeep();
+        }
         if (typeof navigator !== 'undefined' && navigator.vibrate) {
           try { navigator.vibrate(80); } catch {}
         }
@@ -152,17 +204,24 @@ export default function App() {
       return () => clearTimeout(timer);
     } else {
       setCombatState('active');
+      if (soundEnabled) {
+        soundEffects.playCombatStartTone();
+      }
       if (typeof navigator !== 'undefined' && navigator.vibrate) {
         try { navigator.vibrate([200, 100, 300]); } catch {}
       }
     }
-  }, [combatState, countdownSeconds]);
+  }, [combatState, countdownSeconds, soundEnabled]);
 
-  // Parada inmediata de emergencia (cancela cuenta regresiva y detiene motores)
+  // Parada inmediata de emergencia ('S 0')
   const handleEmergencyStop = () => {
+    setActiveDir('S');
     setLevers({ center: 0, left: 0, right: 0 });
     setCombatState('idle');
     setCountdownSeconds(3);
+    if (soundEnabled) {
+      soundEffects.playStopTone();
+    }
     bleService.forceStopImmediate();
   };
 
@@ -186,35 +245,28 @@ export default function App() {
     }
   };
 
-  // Atajos de teclado para pruebas en PC
+  // Atajos de teclado para pruebas en PC (W, A, S, D, Espacio, G)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.repeat) return;
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
       switch (e.key.toLowerCase()) {
         case 'w':
         case 'arrowup':
-          setLevers((prev) => ({ ...prev, center: 80 }));
+          handleDirectionStart('F');
           break;
         case 's':
         case 'arrowdown':
-          setLevers((prev) => ({ ...prev, center: -80 }));
+          handleDirectionStart('R');
           break;
         case 'a':
         case 'arrowleft':
-          // Giro diferencial a la izquierda
-          setLevers((prev) => ({ ...prev, left: -80, right: 80 }));
+          handleDirectionStart('L');
           break;
         case 'd':
         case 'arrowright':
-          // Giro diferencial a la derecha
-          setLevers((prev) => ({ ...prev, left: 80, right: -80 }));
-          break;
-        case 'q':
-          setLevers((prev) => ({ ...prev, left: 80 }));
-          break;
-        case 'e':
-          setLevers((prev) => ({ ...prev, right: 80 }));
+          handleDirectionStart('D');
           break;
         case 'g':
           handleCombatStart();
@@ -229,17 +281,13 @@ export default function App() {
       switch (e.key.toLowerCase()) {
         case 'w':
         case 's':
-        case 'arrowup':
-        case 'arrowdown':
-          setLevers((prev) => ({ ...prev, center: 0 }));
-          break;
         case 'a':
         case 'd':
+        case 'arrowup':
+        case 'arrowdown':
         case 'arrowleft':
         case 'arrowright':
-        case 'q':
-        case 'e':
-          setLevers((prev) => ({ ...prev, left: 0, right: 0 }));
+          handleDirectionEnd();
           break;
       }
     };
@@ -250,42 +298,62 @@ export default function App() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, []);
+  }, [handleDirectionStart, handleDirectionEnd]);
+
+  const openCodeModal = (tab: 'appjsx' | 'packagejson' | 'code' | 'wiring') => {
+    setFirmwareInitialTab(tab);
+    setIsFirmwareOpen(true);
+  };
 
   return (
     <div className="relative w-screen h-screen min-h-[460px] bg-slate-950 text-slate-100 flex flex-col overflow-hidden select-none font-sans">
       
-      {/* Guía visual si el móvil se coloca en vertical */}
-      <LandscapeHelper onToggleFullscreen={toggleFullscreen} />
-
-      {/* Modal de Firmware ESP32 y Diagrama */}
+      {/* Modal de Código Fuente, Vercel package.json, y Firmware ESP32 */}
       <FirmwareModal
         isOpen={isFirmwareOpen}
         onClose={() => setIsFirmwareOpen(false)}
+        initialTab={firmwareInitialTab}
       />
 
       {/* BARRA SUPERIOR COMPACTA (Top Bar Contract: 3 Zonas) */}
-      <header className="h-12 px-4 md:px-6 border-b border-slate-800/80 bg-slate-900/90 backdrop-blur-md flex items-center justify-between gap-4 shrink-0 z-30">
+      <header className="h-12 px-3 sm:px-6 border-b border-slate-800/80 bg-slate-900/95 backdrop-blur-md flex items-center justify-between gap-3 shrink-0 z-30">
         
-        {/* Zona 1: Brand Wordmark & Metadata limpia */}
+        {/* Zona 1: Logo & Switch de Modo */}
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
-            <div className="w-2.5 h-2.5 rounded-sm bg-cyan-400 rotate-45" />
+            <div className="w-2.5 h-2.5 rounded-sm bg-cyan-400 rotate-45 shadow-sm shadow-cyan-400" />
             <h1 className="font-display font-bold text-sm tracking-wide text-slate-100 uppercase whitespace-nowrap">
               SumoBot BLE
             </h1>
           </div>
-          <div className="hidden sm:flex items-center gap-2 text-xs text-slate-400 font-mono">
-            <span>ESP32 C++</span>
-            <span aria-hidden="true">·</span>
-            <span>TB6612FNG</span>
-            <span aria-hidden="true">·</span>
-            <span>TCRT5000 IR</span>
+
+          {/* Toggle Modo 3 Palancas vs D-Pad */}
+          <div className="flex items-center bg-slate-950/80 p-0.5 rounded-lg border border-slate-800">
+            <button
+              onClick={() => setControlMode('levers')}
+              className={`px-2.5 py-0.5 rounded text-[11px] font-medium transition-colors ${
+                controlMode === 'levers'
+                  ? 'bg-cyan-500 text-slate-950 font-bold shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              3 Palancas
+            </button>
+            <button
+              onClick={() => setControlMode('dpad')}
+              className={`px-2.5 py-0.5 rounded text-[11px] font-medium transition-colors ${
+                controlMode === 'dpad'
+                  ? 'bg-cyan-500 text-slate-950 font-bold shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              D-Pad Táctil
+            </button>
           </div>
         </div>
 
-        {/* Zona 2: Control de Throttling y Frecuencia TX */}
-        <div className="hidden md:flex items-center gap-3 text-xs font-mono text-slate-400">
+        {/* Zona 2: Control de Throttling & Telemetría en vivo */}
+        <div className="hidden lg:flex items-center gap-3 text-xs font-mono text-slate-400">
           <div className="flex items-center gap-1.5 bg-slate-950/70 px-2 py-0.5 rounded border border-slate-800">
             <Sliders className="w-3.5 h-3.5 text-cyan-400" />
             <span className="text-[10px] uppercase text-slate-500">Throttling:</span>
@@ -299,7 +367,7 @@ export default function App() {
                       ? 'bg-cyan-500 text-slate-950 font-bold'
                       : 'text-slate-400 hover:text-slate-200 bg-slate-900'
                   }`}
-                  title={`Intervalo de envío BLE de ${ms}ms`}
+                  title={`Enviar comandos cada ${ms}ms`}
                 >
                   {ms}ms
                 </button>
@@ -307,366 +375,412 @@ export default function App() {
             </div>
           </div>
 
-          <span aria-hidden="true" className="text-slate-700">|</span>
-
-          <div className="flex items-center gap-1.5">
-            <Activity className="w-3.5 h-3.5 text-cyan-400" />
-            <span>TX: {telemetry.packetsPerSec} Hz</span>
-          </div>
-
-          <span aria-hidden="true" className="text-slate-700">|</span>
-
-          <div className="flex items-center gap-1.5">
-            <span className="text-[10px] uppercase text-slate-500">Watchdog:</span>
-            <div className="w-16 h-1.5 bg-slate-800 rounded-full overflow-hidden">
-              <div 
-                className={`h-full transition-all duration-100 ${
-                  watchdogProgress > 40 ? 'bg-emerald-500' : 'bg-rose-500'
-                }`}
-                style={{ width: `${watchdogProgress}%` }}
-              />
-            </div>
+          <div className="flex items-center gap-2 bg-slate-950/70 px-2 py-0.5 rounded border border-slate-800 text-[11px]">
+            <span>TX: <strong className="text-slate-200">{telemetry.packetsPerSec} Hz</strong></span>
+            <span className="text-slate-600">|</span>
+            <span>Trama: <strong className="text-cyan-400">{telemetry.lastPacketPayload}</strong></span>
           </div>
         </div>
 
-        {/* Zona 3: Botones de Acción (Firmware, Simulador, BLE Connect) */}
+        {/* Zona 3: Botones de Acción (Bluetooth, Código, Sonido, Fullscreen) */}
         <div className="flex items-center gap-2">
+          {/* Botón Ver Código / Vercel */}
           <button
-            onClick={() => setShowSimulator(!showSimulator)}
-            className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors flex items-center gap-1.5 ${
-              showSimulator 
-                ? 'bg-slate-800 border-cyan-500/50 text-cyan-300' 
-                : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200'
-            }`}
-            title="Alternar vista del simulador de Dohyo"
+            onClick={() => openCodeModal('appjsx')}
+            className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-750 text-slate-300 text-xs font-medium border border-slate-700 transition-colors"
+            title="Ver código fuente de App.jsx y package.json para Vercel"
           >
-            <Layers className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Dohyo</span>
+            <FileCode className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="text-[11px]">Código Vercel</span>
           </button>
 
+          {/* Botón Audio */}
           <button
-            onClick={() => setIsFirmwareOpen(true)}
-            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium border border-slate-700 transition-colors flex items-center gap-1.5"
-            title="Ver código fuente C++ para ESP32"
+            onClick={() => setSoundEnabled(!soundEnabled)}
+            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 border border-slate-700/80 transition-colors"
+            title={soundEnabled ? 'Silenciar sonidos de combate' : 'Activar sonidos de combate'}
           >
-            <Cpu className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="hidden sm:inline">Firmware C++</span>
+            {soundEnabled ? <Volume2 className="w-4 h-4 text-amber-400" /> : <VolumeX className="w-4 h-4" />}
           </button>
 
+          {/* Botón Fullscreen */}
           <button
             onClick={toggleFullscreen}
-            className="p-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors"
-            title="Pantalla completa"
+            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 border border-slate-700/80 transition-colors"
+            title={isFullscreen ? 'Salir de pantalla completa' : 'Pantalla completa horizontal'}
           >
-            {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+            {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
           </button>
 
-          {/* Botón Principal BLE Ultra-Visible */}
-          <button
-            onClick={toggleBleConnection}
-            className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-2 transition-all shadow-md active:scale-95 ${
-              bleStatus === 'connected'
-                ? 'bg-emerald-600 hover:bg-rose-700 text-white shadow-emerald-500/30 border border-emerald-400/50'
-                : bleStatus === 'connecting'
-                  ? 'bg-amber-600 text-white animate-pulse shadow-amber-500/30 border border-amber-400/50'
-                  : bleStatus === 'unsupported'
-                    ? 'bg-slate-800 text-slate-400 cursor-not-allowed border border-slate-700'
-                    : 'bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white shadow-cyan-500/40 border border-cyan-400/60 ring-2 ring-cyan-500/20 animate-pulse'
-            }`}
-            title="Conectar o desconectar ESP32 por Bluetooth BLE"
-          >
-            {bleStatus === 'connected' ? (
-              <>
-                <BluetoothConnected className="w-4 h-4 text-emerald-200" />
-                <span className="font-display tracking-wide uppercase">Desconectar</span>
-              </>
-            ) : bleStatus === 'connecting' ? (
-              <>
-                <Bluetooth className="w-4 h-4 animate-spin text-amber-200" />
-                <span className="font-display tracking-wide uppercase">Buscando ESP32...</span>
-              </>
-            ) : bleStatus === 'unsupported' ? (
-              <>
-                <BluetoothOff className="w-4 h-4" />
-                <span>Sin Web BLE</span>
-              </>
-            ) : (
-              <>
-                <Bluetooth className="w-4 h-4 text-cyan-200 animate-bounce" />
-                <span className="font-display tracking-wider uppercase">Conectar ESP32</span>
-              </>
-            )}
-          </button>
+          {/* Botón Principal Web Bluetooth */}
+          {bleStatus === 'connected' ? (
+            <button
+              onClick={toggleBleConnection}
+              className="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 text-xs font-bold hover:bg-emerald-500/30 transition-all shadow-sm shadow-emerald-500/20"
+            >
+              <BluetoothConnected className="w-4 h-4 text-emerald-400 animate-pulse" />
+              <span className="truncate max-w-[90px] sm:max-w-none">
+                {telemetry.deviceName || 'Conectado'}
+              </span>
+            </button>
+          ) : (
+            <button
+              onClick={toggleBleConnection}
+              disabled={bleStatus === 'connecting'}
+              className="flex items-center gap-1.5 px-3.5 py-1 rounded-xl bg-cyan-500 hover:bg-cyan-400 active:scale-95 text-slate-950 text-xs font-bold transition-all shadow-md shadow-cyan-500/25"
+            >
+              <Bluetooth className={`w-4 h-4 ${bleStatus === 'connecting' ? 'animate-spin' : ''}`} />
+              <span>{bleStatus === 'connecting' ? 'Buscando...' : 'Conectar ESP32'}</span>
+            </button>
+          )}
         </div>
       </header>
 
-      {/* Alerta de Error BLE */}
+      {/* Banner de Error o Alerta si ocurre */}
       {bleError && (
-        <div className="bg-rose-950/80 border-b border-rose-800 text-rose-200 px-4 py-1.5 text-xs flex items-center justify-between">
+        <div className="bg-rose-950/80 border-b border-rose-800 px-4 py-1.5 flex items-center justify-between text-xs text-rose-300 z-20">
           <div className="flex items-center gap-2">
-            <ShieldAlert className="w-4 h-4 text-rose-400" />
+            <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
             <span>{bleError}</span>
           </div>
-          <button onClick={() => setBleError(null)} className="text-rose-400 hover:text-white text-xs underline">
-            Descartar
+          <button
+            onClick={() => setBleError(null)}
+            className="text-[11px] underline text-rose-400 hover:text-rose-200"
+          >
+            Entendido
           </button>
         </div>
       )}
 
-      {/* CABINA PRINCIPAL EN ORIENTACIÓN HORIZONTAL (LANDSCAPE) */}
-      <main className="flex-1 w-full p-2 md:p-4 grid grid-cols-12 gap-2 md:gap-4 overflow-hidden items-stretch">
+      {/* CUERPO PRINCIPAL DEL COCKPIT (LANDSCAPE MODE: 3 COLUMNAS) */}
+      <main className="flex-1 flex min-h-0 overflow-hidden relative">
         
-        {/* COLUMNA IZQUIERDA: PALANCA IZQUIERDA (Giro / Tracción Oruga Izquierda) */}
-        <section className="col-span-3 sm:col-span-3 flex flex-col items-center justify-between p-2 rounded-2xl bg-slate-900/40 border border-slate-800/80 shadow-lg">
-          <LeverControl
-            id="left"
-            label="Rueda Izq"
-            sublabel="Giro / Ataque"
-            value={levers.left}
-            onChange={handleLeftChange}
-            hasSnapping={snappingEnabled}
-            accentColor="cyan"
-          />
+        {/* Fondo sutil con grid cibernético de combate */}
+        <div 
+          className="absolute inset-0 opacity-15 pointer-events-none"
+          style={{
+            backgroundImage: `radial-gradient(circle at 50% 50%, rgba(6, 182, 212, 0.15) 0%, transparent 70%),
+                              linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+                              linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px)`,
+            backgroundSize: '100% 100%, 32px 32px, 32px 32px'
+          }}
+        />
 
-          {/* Medidor de Potencia Izquierda */}
-          <div className="w-full mt-2 pt-2 border-t border-slate-800 flex items-center justify-between px-2 text-[10px] font-mono text-slate-400">
-            <span>MOTOR L</span>
-            <span className={`font-bold ${motorSpeeds.left !== 0 ? 'text-cyan-300' : 'text-slate-500'}`}>
-              {Math.round(motorSpeeds.left)}%
+        {/* COLUMNA 1: ZONA TÁCTIL IZQUIERDA (D-PAD O PALANCA IZQ) */}
+        <section className="w-[32%] sm:w-[30%] min-w-[210px] h-full p-2 sm:p-3 flex flex-col justify-center items-center border-r border-slate-800/80 bg-slate-900/40 relative z-10">
+          <div className="w-full flex items-center justify-between px-2 mb-1">
+            <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+              {controlMode === 'dpad' ? 'D-Pad Táctil' : 'Tracción Izq.'}
+            </span>
+            <span className="text-[9px] font-mono text-slate-500">
+              {controlMode === 'dpad' ? `DIR: ${activeDir}` : `${levers.left}%`}
             </span>
           </div>
-        </section>
 
-        {/* COLUMNA CENTRAL: PALANCA CENTRAL + HUD COMBATE + DOHYO */}
-        <section className="col-span-6 sm:col-span-6 flex flex-col justify-between p-2 md:p-3 rounded-2xl bg-slate-900/60 border border-slate-800 shadow-xl overflow-y-auto">
-          
-          {/* Header del Centro: Estado de Combate y Aviso de Override */}
-          <div className="flex items-center justify-between mb-1.5">
-            <div className="flex items-center gap-2">
-              <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider border transition-colors ${
-                currentCmd.dir === 'F'
-                  ? 'bg-emerald-950/90 border-emerald-500 text-emerald-300 shadow-sm shadow-emerald-500/20'
-                  : currentCmd.dir === 'R'
-                    ? 'bg-amber-950/90 border-amber-500 text-amber-300 shadow-sm shadow-amber-500/20'
-                    : currentCmd.dir === 'L'
-                      ? 'bg-cyan-950/90 border-cyan-500 text-cyan-300 shadow-sm shadow-cyan-500/20'
-                      : currentCmd.dir === 'D'
-                        ? 'bg-blue-950/90 border-blue-500 text-blue-300 shadow-sm shadow-blue-500/20'
-                        : 'bg-slate-800/80 border-slate-700 text-slate-400'
-              }`}>
-                {currentCmd.dir === 'S' 
-                  ? 'MOTORES EN REPOSO (S 0)' 
-                  : `${currentCmd.label} (${currentCmd.rawPayload})`}
-              </span>
-            </div>
-
-            {/* Grupo de Acciones de Combate: Arranque 'G' y Parada 'S 0' */}
-            <div className="flex items-center gap-2">
-              {combatState === 'idle' ? (
-                <button
-                  onClick={handleCombatStart}
-                  className="px-3 py-1 rounded-lg bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-500 hover:from-emerald-500 hover:to-teal-400 text-white font-display text-xs font-bold flex items-center gap-1.5 shadow-md shadow-emerald-500/30 active:scale-95 transition-all border border-emerald-400/60 animate-pulse"
-                  title="Envía el comando 'G' (Go) por Bluetooth para desbloquear los 3 segundos reglamentarios de quietud en el dohyo"
-                >
-                  <Zap className="w-3.5 h-3.5 text-yellow-300" />
-                  <span>INICIAR (G)</span>
-                </button>
-              ) : combatState === 'countdown' ? (
-                <div className="px-3 py-1 rounded-lg bg-amber-500 text-slate-950 font-display text-xs font-bold flex items-center gap-1.5 animate-bounce shadow-md shadow-amber-500/30 border border-amber-300">
-                  <Timer className="w-3.5 h-3.5" />
-                  <span>QUIETUD: {countdownSeconds}s</span>
-                </div>
-              ) : (
-                <div className="px-3 py-1 rounded-lg bg-emerald-600 text-white font-display text-xs font-bold flex items-center gap-1.5 shadow-md shadow-emerald-500/30 border border-emerald-400">
-                  <Zap className="w-3.5 h-3.5 text-yellow-300" />
-                  <span>¡EN COMBATE!</span>
-                </div>
-              )}
-
-              {/* Botón de Parada de Emergencia Inmediata */}
-              <button
-                onClick={handleEmergencyStop}
-                className="px-2.5 py-1 rounded-lg bg-rose-600/80 hover:bg-rose-500 text-white font-mono text-[10px] font-bold flex items-center gap-1 transition-transform active:scale-95 shadow border border-rose-500/50"
-                title="Detener motores inmediatamente (envía 'S 0')"
-              >
-                <RotateCcw className="w-3 h-3" />
-                PARADA (S 0)
-              </button>
-            </div>
-          </div>
-
-          {/* Banner de Cuenta Regresiva Reglamentaria (3s de quietud) */}
-          {combatState === 'countdown' && (
-            <div className="w-full mb-2 py-1.5 px-3 rounded-xl bg-amber-950/80 border border-amber-500/60 text-amber-200 text-xs font-mono flex items-center justify-between shadow-lg animate-pulse">
-              <div className="flex items-center gap-2">
-                <Timer className="w-4 h-4 text-amber-400" />
-                <span>REGLAMENTO DOHYO: 3s DE QUIETUD</span>
-              </div>
-              <span className="text-sm font-bold text-amber-300 font-display">
-                ¡GO EN {countdownSeconds}s!
-              </span>
-            </div>
-          )}
-          {combatState === 'active' && (
-            <div className="w-full mb-2 py-1 px-3 rounded-xl bg-emerald-950/70 border border-emerald-500/40 text-emerald-300 text-[11px] font-mono flex items-center justify-between">
-              <span className="flex items-center gap-1.5 font-bold">
-                <Zap className="w-3.5 h-3.5 text-yellow-300" />
-                COMBATE DESBLOQUEADO — CONTROL TOTAL DE MOTORES
-              </span>
-              <span className="text-[10px] text-emerald-400/80 font-sans hidden sm:inline">
-                Comando 'G' transmitido
-              </span>
-            </div>
-          )}
-
-          {/* BOTÓN PRINCIPAL DE CONEXIÓN BLUETOOTH (ULTRA-VISIBLE EN EL CENTRO) */}
-          {bleStatus !== 'connected' ? (
-            <button
-              onClick={toggleBleConnection}
-              className={`w-full mb-2 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow-lg transition-all active:scale-[0.98] border ${
-                bleStatus === 'connecting'
-                  ? 'bg-amber-600 text-white border-amber-400 shadow-amber-500/20 animate-pulse'
-                  : bleStatus === 'unsupported'
-                    ? 'bg-slate-800 text-slate-400 border-slate-700 cursor-not-allowed'
-                    : 'bg-gradient-to-r from-cyan-600 via-blue-600 to-cyan-500 hover:from-cyan-500 hover:to-blue-400 text-white border-cyan-300/40 shadow-cyan-500/30 animate-pulse'
-              }`}
-            >
-              {bleStatus === 'connecting' ? (
-                <>
-                  <Bluetooth className="w-4 h-4 animate-spin text-amber-200" />
-                  <span className="font-display tracking-wider uppercase">
-                    Buscando ESP32... (Selecciona tu robot en el cuadro)
-                  </span>
-                </>
-              ) : bleStatus === 'unsupported' ? (
-                <>
-                  <BluetoothOff className="w-4 h-4 text-slate-400" />
-                  <span>Tu navegador no soporta Web Bluetooth (Usa Chrome o Edge)</span>
-                </>
-              ) : (
-                <>
-                  <Bluetooth className="w-4 h-4 text-cyan-200 animate-bounce" />
-                  <span className="font-display tracking-wider uppercase text-[11px] sm:text-xs">
-                    ⚡ Conectar Robot ESP32 por Bluetooth
-                  </span>
-                </>
-              )}
-            </button>
-          ) : (
-            <div className="w-full mb-2 py-1 px-3 rounded-xl bg-emerald-950/70 border border-emerald-500/50 text-emerald-200 text-xs flex items-center justify-between shadow-sm">
-              <div className="flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                <span className="font-mono text-[11px] font-semibold text-emerald-300">
-                  ESP32 CONECTADO: {telemetry.deviceName || 'SumoBot-ESP32'}
-                </span>
-                <span className="text-[10px] text-emerald-400/80 font-sans hidden sm:inline">
-                  · Listo para mover las palancas
-                </span>
-              </div>
-              <button
-                onClick={toggleBleConnection}
-                className="text-[10px] font-mono text-rose-300 hover:text-white bg-rose-950/80 hover:bg-rose-900 px-2 py-0.5 rounded border border-rose-800 transition-colors"
-                title="Desconectar Bluetooth"
-              >
-                Desconectar
-              </button>
-            </div>
-          )}
-
-          {/* Área Central: Simulador de Dohyo y Palanca Central */}
-          <div className="flex-1 flex items-center justify-around gap-2 my-1">
-            
-            {/* Palanca Central (Avance / Retroceso Rectilíneo) */}
-            <div className="h-full flex items-center justify-center">
-              <LeverControl
-                id="center"
-                label="Empuje Central"
-                sublabel="Avance / Reversa"
-                value={levers.center}
-                onChange={handleCenterChange}
-                isOverridden={isOverrideActive}
-                accentColor="emerald"
+          <div className="flex-1 w-full flex items-center justify-center">
+            {controlMode === 'dpad' ? (
+              <DirectionalPad
+                onDirectionStart={handleDirectionStart}
+                onDirectionEnd={handleDirectionEnd}
+                activeDirection={activeDir}
+                speed={speed}
               />
-            </div>
-
-            {/* Simulador de Dohyo Integrado */}
-            {showSimulator && (
-              <div className="hidden lg:flex flex-col items-center justify-center">
-                <DohyoSimulator
-                  motorSpeeds={motorSpeeds}
-                  overrideActive={isOverrideActive}
+            ) : (
+              <div className="h-full flex items-center justify-center py-2">
+                <LeverControl
+                  id="left"
+                  label="TRACCIÓN IZQUIERDA"
+                  sublabel="Diferencial Izq."
+                  value={levers.left}
+                  onChange={handleLeftChange}
+                  accentColor="cyan"
+                  hasSnapping={true}
+                  isOverridden={false}
                 />
               </div>
             )}
           </div>
+        </section>
 
-          {/* Telemetría Inferior y Trama de Paquete BLE en Vivo */}
-          <div className="mt-2 pt-2 border-t border-slate-800/80 grid grid-cols-2 sm:grid-cols-4 gap-2 text-center text-[10px] font-mono">
-            <div className="p-1 rounded bg-slate-950/70 border border-slate-800">
-              <span className="text-slate-500 block text-[9px]">TRAMA BLE</span>
-              <span className="text-cyan-300 font-bold truncate block">
-                {telemetry.lastPacketPayload || 'S 0'}
-              </span>
+        {/* COLUMNA 2: NÚCLEO TÁCTICO CENTRAL (INICIO DE COMBATE 'G', DOHYO SIMULATOR, PALANCA CENTRAL Y FRENO) */}
+        <section className="flex-1 h-full p-2 sm:p-3 flex flex-col justify-between items-center bg-slate-950/60 relative z-10 overflow-hidden">
+          
+          {/* 1. SECCIÓN SUPERIOR: BOTÓN DESTACADO DE INICIO DE COMBATE ('G') Y BOTÓN DE FRENO */}
+          <div className="w-full max-w-xl flex items-center gap-2 shrink-0">
+            {/* BOTÓN DESTACADO DE COMBATE O CUENTA REGRESIVA */}
+            <div className="flex-1">
+              {combatState === 'countdown' ? (
+                <div className="w-full py-2 px-3 bg-gradient-to-r from-amber-600/30 via-amber-500/20 to-amber-600/30 border-2 border-amber-400 rounded-xl flex items-center justify-center gap-3 shadow-lg shadow-amber-500/20 animate-pulse">
+                  <div className="w-8 h-8 rounded-full bg-amber-400 text-slate-950 flex items-center justify-center font-black text-xl font-mono shadow-md">
+                    {countdownSeconds}
+                  </div>
+                  <div className="text-left">
+                    <span className="text-xs font-black uppercase text-amber-300 tracking-wider block">
+                      ¡3s de Quietud Reglamentaria!
+                    </span>
+                    <span className="text-[9px] font-mono text-amber-200/80">
+                      Motores bloqueados en el dohyo
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleCombatStart}
+                  className="w-full group relative py-2.5 px-3 bg-gradient-to-r from-red-600 via-rose-600 to-amber-600 hover:from-red-500 hover:via-rose-500 hover:to-amber-500 active:scale-[0.98] text-white rounded-xl font-black text-xs sm:text-sm uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg shadow-rose-600/30 transition-all border border-rose-400/40"
+                >
+                  <Swords className="w-4 h-4 text-amber-300 shrink-0 group-hover:rotate-12 transition-transform" />
+                  <span className="drop-shadow-sm font-display tracking-wider">
+                    {combatState === 'active' ? '¡REINICIAR COMBATE (G)!' : 'INICIAR COMBATE (G)'}
+                  </span>
+                  <span className="ml-auto text-[9px] font-mono bg-black/40 px-1.5 py-0.5 rounded text-amber-200">
+                    3s
+                  </span>
+                </button>
+              )}
             </div>
-            <div className="p-1 rounded bg-slate-950/70 border border-slate-800">
-              <span className="text-slate-500 block text-[9px]">FRECUENCIA</span>
-              <span className="text-slate-200 font-bold">
-                {telemetry.packetsPerSec} pkt/s
-              </span>
+
+            {/* BOTÓN DE FRENO DE EMERGENCIA ('S 0') */}
+            <button
+              type="button"
+              onClick={handleEmergencyStop}
+              className="py-2.5 px-3 bg-rose-950/70 hover:bg-rose-900 border-2 border-rose-600/80 active:scale-95 text-rose-200 rounded-xl font-bold text-xs uppercase flex items-center gap-1.5 shadow-md shadow-rose-950/50 transition-all shrink-0"
+              title="Detener motores inmediatamente (Espacio)"
+            >
+              <Octagon className="w-4 h-4 text-rose-400 shrink-0" />
+              <span className="hidden sm:inline">FRENO</span>
+              <span>('S 0')</span>
+            </button>
+          </div>
+
+          {/* 2. SECCIÓN CENTRAL INTERMEDIA: PALANCA CENTRAL */}
+          {controlMode === 'levers' ? (
+            <div className="flex-1 w-full max-w-xl flex items-center justify-center my-1 min-h-0">
+              {/* Palanca Central (Empuje Rectilíneo Avance / Reversa) */}
+              <div className="h-full flex flex-col items-center justify-center py-1">
+                <LeverControl
+                  id="center"
+                  label="EMPUJE CENTRAL"
+                  sublabel="Avance / Reversa"
+                  value={levers.center}
+                  onChange={handleCenterChange}
+                  accentColor="emerald"
+                  hasSnapping={true}
+                  isOverridden={isOverrideActive}
+                />
+              </div>
             </div>
-            <div className="p-1 rounded bg-slate-950/70 border border-slate-800">
-              <span className="text-slate-500 block text-[9px]">THROTTLING</span>
-              <span className="text-cyan-400 font-bold">
-                {throttleMs} ms ({Math.round(1000 / throttleMs)} Hz)
-              </span>
+          ) : (
+            /* Modo D-Pad: slider de velocidad */
+            <div className="flex-1 w-full max-w-md flex flex-col items-center justify-center gap-3 my-1">
+              <div className="w-full bg-slate-900/90 border border-slate-800 rounded-xl p-3 shadow-lg">
+                <div className="flex items-center justify-between text-xs font-mono mb-2">
+                  <div className="flex items-center gap-2 text-slate-300 font-semibold">
+                    <Zap className="w-4 h-4 text-amber-400" />
+                    <span className="text-xs">Velocidad PWM</span>
+                  </div>
+                  <strong className="text-cyan-400 text-xs">{speed} / 255</strong>
+                </div>
+                <input
+                  type="range"
+                  min="100"
+                  max="255"
+                  step="5"
+                  value={speed}
+                  onChange={(e) => handleSpeedChange(Number(e.target.value))}
+                  className="w-full h-3 bg-slate-950 rounded-lg appearance-none cursor-pointer accent-cyan-400"
+                />
+              </div>
             </div>
-            <div className="p-1 rounded bg-slate-950/70 border border-slate-800">
-              <span className="text-slate-500 block text-[9px]">LATENCIA</span>
-              <span className="text-slate-200 font-bold">
-                {telemetry.lastLatencyMs} ms
-              </span>
+          )}
+
+          {/* 3. SECCIÓN INFERIOR: PRESETS RÁPIDOS DE POTENCIA Y BARRA DE ESTADO */}
+          <div className="w-full max-w-xl flex items-center justify-between gap-2 px-1 text-xs font-mono shrink-0">
+            <div className="flex items-center gap-1 text-[10px]">
+              <span className="text-slate-500 uppercase">Trim:</span>
+              {[
+                { val: 100, label: 'Min' },
+                { val: 180, label: '180' },
+                { val: 220, label: '220' },
+                { val: 255, label: 'Max' },
+              ].map((p) => (
+                <button
+                  key={p.val}
+                  type="button"
+                  onClick={() => handleSpeedChange(p.val)}
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-mono transition-colors ${
+                    speed === p.val
+                      ? 'bg-cyan-500 text-slate-950 font-bold'
+                      : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
+                  }`}
+                >
+                  {p.label}
+                </button>
+              ))}
             </div>
+
+            {/* Telemetría Compacta */}
+            <div className="flex items-center gap-2 text-[10px] text-slate-400 bg-slate-900/80 px-2 py-0.5 rounded border border-slate-800">
+              <span>TX: <strong className="text-slate-200">{telemetry.packetsPerSec} Hz</strong></span>
+              <span className="text-slate-600">•</span>
+              <span>Trama: <strong className="text-cyan-400">{telemetry.lastPacketPayload}</strong></span>
+            </div>
+
+            {/* Enlace rápido para ver package.json limpio */}
+            <button
+              type="button"
+              onClick={() => openCodeModal('packagejson')}
+              className="px-2 py-0.5 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 rounded text-[10px] font-mono flex items-center gap-1 transition-colors"
+              title="Copiar package.json sin conflictos ERESOLVE"
+            >
+              <FileCode className="w-3 h-3 text-emerald-400" />
+              <span>Vercel</span>
+            </button>
           </div>
         </section>
 
-        {/* COLUMNA DERECHA: PALANCA DERECHA (Giro / Tracción Oruga Derecha) */}
-        <section className="col-span-3 sm:col-span-3 flex flex-col items-center justify-between p-2 rounded-2xl bg-slate-900/40 border border-slate-800/80 shadow-lg">
-          <LeverControl
-            id="right"
-            label="Rueda Der"
-            sublabel="Giro / Ataque"
-            value={levers.right}
-            onChange={handleRightChange}
-            hasSnapping={snappingEnabled}
-            accentColor="cyan"
-          />
-
-          {/* Medidor de Potencia Derecha */}
-          <div className="w-full mt-2 pt-2 border-t border-slate-800 flex items-center justify-between px-2 text-[10px] font-mono text-slate-400">
-            <span>MOTOR R</span>
-            <span className={`font-bold ${motorSpeeds.right !== 0 ? 'text-cyan-300' : 'text-slate-500'}`}>
-              {Math.round(motorSpeeds.right)}%
+        {/* COLUMNA 3: ZONA DERECHA (MANIOBRAS RÁPIDAS / SIMULADOR / PALANCA DERECHA) */}
+        <section className="w-[32%] sm:w-[30%] min-w-[210px] h-full p-2 sm:p-3 flex flex-col justify-between border-l border-slate-800/80 bg-slate-900/40 relative z-10">
+          
+          <div className="w-full flex items-center justify-between px-2 mb-1">
+            <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+              {controlMode === 'dpad' ? 'Maniobras de Ataque' : 'Tracción Der.'}
+            </span>
+            <span className="text-[9px] font-mono text-slate-500">
+              {controlMode === 'dpad' ? 'Táctico' : `${levers.right}%`}
             </span>
           </div>
+
+          {controlMode === 'dpad' ? (
+            <div className="flex-1 flex flex-col justify-between py-1 gap-2">
+              
+              {/* Botón Embestida Turbo a 255 */}
+              <button
+                type="button"
+                onPointerDown={(e) => { e.preventDefault(); setSpeed(255); handleDirectionStart('F'); }}
+                onPointerUp={handleDirectionEnd}
+                onPointerCancel={handleDirectionEnd}
+                onPointerLeave={handleDirectionEnd}
+                className="py-2.5 px-3 bg-gradient-to-r from-slate-800 to-slate-850 hover:bg-slate-750 border border-emerald-500/40 text-emerald-300 rounded-xl text-xs font-bold flex items-center justify-between shadow-md active:scale-95 transition-all"
+              >
+                <div className="flex items-center gap-2">
+                  <Zap className="w-4 h-4 text-emerald-400" />
+                  <span>Embestida Turbo</span>
+                </div>
+                <span className="text-[10px] font-mono bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 rounded font-bold">
+                  F 255
+                </span>
+              </button>
+
+              {/* Botón Giro Rápido Tornado Izquierda */}
+              <button
+                type="button"
+                onPointerDown={(e) => { e.preventDefault(); setSpeed(240); handleDirectionStart('L'); }}
+                onPointerUp={handleDirectionEnd}
+                onPointerCancel={handleDirectionEnd}
+                onPointerLeave={handleDirectionEnd}
+                className="py-2.5 px-3 bg-gradient-to-r from-slate-800 to-slate-850 hover:bg-slate-750 border border-amber-500/40 text-amber-300 rounded-xl text-xs font-bold flex items-center justify-between shadow-md active:scale-95 transition-all"
+              >
+                <div className="flex items-center gap-2">
+                  <RotateCcw className="w-4 h-4 text-amber-400" />
+                  <span>Tornado Izq. ↺</span>
+                </div>
+                <span className="text-[10px] font-mono bg-amber-500/20 text-amber-400 px-1.5 py-0.5 rounded font-bold">
+                  L 240
+                </span>
+              </button>
+
+              {/* Botón Giro Rápido Tornado Derecha */}
+              <button
+                type="button"
+                onPointerDown={(e) => { e.preventDefault(); setSpeed(240); handleDirectionStart('D'); }}
+                onPointerUp={handleDirectionEnd}
+                onPointerCancel={handleDirectionEnd}
+                onPointerLeave={handleDirectionEnd}
+                className="py-2.5 px-3 bg-gradient-to-r from-slate-800 to-slate-850 hover:bg-slate-750 border border-amber-500/40 text-amber-300 rounded-xl text-xs font-bold flex items-center justify-between shadow-md active:scale-95 transition-all"
+              >
+                <div className="flex items-center gap-2">
+                  <RotateCcw className="w-4 h-4 text-amber-400 scale-x-[-1]" />
+                  <span>Tornado Der. ↻</span>
+                </div>
+                <span className="text-[10px] font-mono bg-amber-500/20 text-amber-400 px-1.5 py-0.5 rounded font-bold">
+                  D 240
+                </span>
+              </button>
+
+              {/* Monitor de Sensores TCRT5000 (Pines GPIO 35 y 34) */}
+              <div className="bg-slate-950/90 p-2.5 rounded-xl border border-slate-800 text-[11px] font-mono">
+                <div className="flex items-center justify-between text-slate-400 text-[10px] uppercase font-bold mb-1.5">
+                  <span>Sensores de Borde</span>
+                  <span className="text-emerald-400">Activos</span>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <div className="bg-slate-900 px-2 py-1 rounded border border-slate-800 flex items-center justify-between">
+                    <span className="text-slate-400 text-[10px]">Delantero (35):</span>
+                    <span className="w-2 h-2 rounded-full bg-emerald-400" title="Línea no detectada" />
+                  </div>
+                  <div className="bg-slate-900 px-2 py-1 rounded border border-slate-800 flex items-center justify-between">
+                    <span className="text-slate-400 text-[10px]">Trasero (34):</span>
+                    <span className="w-2 h-2 rounded-full bg-emerald-400" title="Línea no detectada" />
+                  </div>
+                </div>
+              </div>
+
+              {/* Mini Simulador de Dohyo */}
+              <button
+                type="button"
+                onClick={() => setShowSimulator(!showSimulator)}
+                className="py-1 px-2 bg-slate-950/70 hover:bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-200 rounded-lg text-[10px] font-mono flex items-center justify-center gap-1 transition-colors"
+              >
+                <span>{showSimulator ? 'Ocultar Dohyo 2D' : 'Ver Radar Dohyo 2D'}</span>
+              </button>
+            </div>
+          ) : (
+            <div className="h-full flex items-center justify-center py-2">
+              <LeverControl
+                id="right"
+                label="TRACCIÓN DERECHA"
+                sublabel="Diferencial Der."
+                value={levers.right}
+                onChange={handleRightChange}
+                accentColor="amber"
+                hasSnapping={true}
+                isOverridden={false}
+              />
+            </div>
+          )}
         </section>
+
       </main>
 
-      {/* PIE DE PÁGINA ULTRA-COMPACTO: Instrucciones y Atajos */}
-      <footer className="h-7 px-4 bg-slate-950 border-t border-slate-900 flex items-center justify-between text-[11px] text-slate-500 shrink-0">
-        <div className="flex items-center gap-3">
-          <span>Táctil: Desliza pulgares en cada palanca</span>
-          <span aria-hidden="true" className="hidden sm:inline">·</span>
-          <span className="hidden sm:inline">PC: W/S (Centro), A/D (Giro), Q/E (Orugas), Espacio (Stop)</span>
+      {/* Modal flotante con Simulador de Dohyo si el usuario lo activa */}
+      {showSimulator && (
+        <div className="absolute right-4 bottom-4 z-40 w-72 bg-slate-900/95 border-2 border-slate-700 rounded-2xl shadow-2xl p-3 animate-fadeIn">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-mono font-bold text-cyan-400 uppercase">
+              Radar Dohyo 2D
+            </span>
+            <button
+              onClick={() => setShowSimulator(false)}
+              className="text-xs text-slate-400 hover:text-white"
+            >
+              ✕
+            </button>
+          </div>
+          <DohyoSimulator motorSpeeds={motorSpeeds} overrideActive={isOverrideActive} />
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setSnappingEnabled(!snappingEnabled)}
-            className="hover:text-slate-300 transition-colors"
-          >
-            Muescas (Snap): {snappingEnabled ? 'ON' : 'OFF'}
-          </button>
-        </div>
-      </footer>
+      )}
+
+      {/* Watchdog Bar inferior sutil */}
+      <div className="h-1 w-full bg-slate-900">
+        <div 
+          className="h-full bg-cyan-400 transition-all duration-100"
+          style={{ width: `${watchdogProgress}%` }}
+        />
+      </div>
+
     </div>
   );
 }

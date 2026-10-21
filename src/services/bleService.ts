@@ -1,4 +1,4 @@
-import { BleConnectionStatus, BleTelemetry, LeverValues, computeSumoMovement } from '../types';
+import { BleConnectionStatus, BleTelemetry, LeverValues, MovementDir, computeSumoMovement } from '../types';
 
 export const SERVICE_UUID = '4fafc201-1fb5-459e-8fcc-c5c9c331914b';
 export const CHARACTERISTIC_UUID = 'c565818d-6972-466d-88b0-517865f14d02';
@@ -11,6 +11,9 @@ export class BleService {
   private isWriting = false;
   private throttleIntervalMs: number = 60; // Configurable entre 50ms y 100ms
   private throttleTimer: number | null = null;
+  private controlMode: 'dpad' | 'levers' = 'dpad';
+  private directCommand: { dir: MovementDir; speed: number } = { dir: 'S', speed: 0 };
+  private lastTransmittedCommand: { dir: MovementDir; speed: number } = { dir: 'S', speed: 0 };
   private latestValues: LeverValues = { center: 0, left: 0, right: 0 };
   private lastTransmittedValues: LeverValues = { center: 0, left: 0, right: 0 };
   private hasUnsentChanges = false;
@@ -48,10 +51,17 @@ export class BleService {
 
   public setThrottleInterval(ms: number) {
     this.throttleIntervalMs = Math.max(40, Math.min(200, ms));
-    // Reiniciar bucle con el nuevo intervalo si está conectado
     if (this.status === 'connected') {
       this.startThrottleLoop();
     }
+  }
+
+  public setControlMode(mode: 'dpad' | 'levers') {
+    this.controlMode = mode;
+  }
+
+  public getControlMode(): 'dpad' | 'levers' {
+    return this.controlMode;
   }
 
   public onStatusChange(callback: (status: BleConnectionStatus, errorMsg?: string) => void) {
@@ -95,14 +105,14 @@ export class BleService {
 
   public async connect(): Promise<boolean> {
     if (!this.isSupported()) {
-      this.setStatus('unsupported', 'Web Bluetooth no está soportado en este navegador. Usa Chrome o Edge.');
+      this.setStatus('unsupported', 'Web Bluetooth no está soportado en este navegador. Usa Google Chrome, Edge o Bluefy (iOS).');
       return false;
     }
 
     try {
       this.setStatus('connecting');
 
-      // Intentamos emparejar con filtro para ESP32_Sumo_TB6612 o con cualquier dispositivo con el servicio
+      // Intentamos emparejar con filtro para el robot o con el servicio UUID
       this.device = await navigator.bluetooth!.requestDevice({
         filters: [
           { namePrefix: 'ESP32_Sumo' },
@@ -130,7 +140,7 @@ export class BleService {
 
       const server = await this.device.gatt?.connect();
       if (!server) {
-        throw new Error('No se pudo conectar al servidor GATT');
+        throw new Error('No se pudo conectar al servidor GATT del ESP32');
       }
 
       const service = await server.getPrimaryService(SERVICE_UUID);
@@ -144,9 +154,9 @@ export class BleService {
       const err = error as Error;
       console.warn('[BLE] Error de conexión:', err);
       if (err.name === 'NotFoundError') {
-        this.setStatus('disconnected', 'Búsqueda cancelada por el usuario');
+        this.setStatus('disconnected', 'Búsqueda BLE cancelada por el usuario');
       } else {
-        this.setStatus('error', err.message || 'Fallo de conexión BLE');
+        this.setStatus('error', err.message || 'Fallo de conexión BLE con el ESP32');
       }
       return false;
     }
@@ -158,7 +168,7 @@ export class BleService {
     this.characteristic = null;
     this.isWriting = false;
     this.hasUnsentChanges = false;
-    this.setStatus('disconnected', 'Dispositivo desconectado');
+    this.setStatus('disconnected', 'Robot desconectado');
   };
 
   public async disconnect() {
@@ -170,11 +180,24 @@ export class BleService {
   }
 
   /**
-   * ACTUALIZACIÓN DE VALORES DESDE LA INTERFAZ TÁCTIL (ZERO-COST, ZERO-NETWORK)
-   * Los eventos táctiles / de puntero SOLO actualizan este estado en memoria.
-   * La transmisión real la gestiona el bucle de Throttling a intervalos fijos.
+   * ACTUALIZACIÓN DE COMANDO DIRECCIONAL DIRECTO (D-PAD)
+   * dir: 'F' | 'R' | 'L' | 'D' | 'S'
+   * speed: 100 a 255
+   */
+  public setDirectCommand(dir: MovementDir, speed: number) {
+    this.controlMode = 'dpad';
+    this.directCommand = {
+      dir,
+      speed: dir === 'S' ? 0 : Math.max(100, Math.min(255, Math.round(speed))),
+    };
+    this.hasUnsentChanges = true;
+  }
+
+  /**
+   * ACTUALIZACIÓN DE VALORES DESDE LA INTERFAZ TÁCTIL (PALANCAS)
    */
   public updateLevers(values: LeverValues) {
+    this.controlMode = 'levers';
     this.latestValues = {
       center: Math.round(values.center),
       left: Math.round(values.left),
@@ -184,12 +207,12 @@ export class BleService {
   }
 
   /**
-   * PARADA INMEDIATA DE EMERGENCIA
-   * Si el usuario suelta la palanca o presiona PARADA, forzamos el envío de "S 0\n"
-   * de forma prioritaria sin esperar el siguiente tick completo.
+   * PARADA INMEDIATA DE EMERGENCIA ('S 0')
    */
   public async forceStopImmediate() {
     this.latestValues = { center: 0, left: 0, right: 0 };
+    this.directCommand = { dir: 'S', speed: 0 };
+    this.lastTransmittedCommand = { dir: 'S', speed: 0 };
     this.hasUnsentChanges = true;
     if (!this.isWriting && this.status === 'connected' && this.characteristic) {
       await this.transmitPacket('S 0\n');
@@ -203,6 +226,7 @@ export class BleService {
    */
   public async sendCombatStart(): Promise<boolean> {
     this.latestValues = { center: 0, left: 0, right: 0 };
+    this.directCommand = { dir: 'S', speed: 0 };
     this.hasUnsentChanges = false;
     if (this.status === 'connected' && this.characteristic) {
       if (this.isWriting) {
@@ -227,33 +251,44 @@ export class BleService {
         return;
       }
 
-      // 1. CANDADO MUTEX: Si hay una escritura previa aún sin confirmar, omitir este tick.
-      // Esto evita el error DOMException: "GATT operation already in progress".
+      // CANDADO MUTEX: Si hay una escritura previa aún sin confirmar, omitir este tick.
+      // Esto evita el error DOMException: "GATT operation already in progress" y saturación en ESP32.
       if (this.isWriting) {
         return;
       }
 
       const now = Date.now();
-      const current = this.latestValues;
-      const last = this.lastTransmittedValues;
 
-      // Comprobar si hubo cambios en las palancas
-      const valuesDiffer = (
-        current.center !== last.center ||
-        current.left !== last.left ||
-        current.right !== last.right
-      );
+      if (this.controlMode === 'dpad') {
+        const current = this.directCommand;
+        const last = this.lastTransmittedCommand;
+        const changed = current.dir !== last.dir || current.speed !== last.speed;
 
-      if (valuesDiffer || this.hasUnsentChanges) {
-        // Calcular comando compatible con el firmware (F, R, L, D, S y velocidad 0-255)
-        const cmd = computeSumoMovement(current);
-        const payload = `${cmd.rawPayload}\n`;
-        this.lastTransmittedValues = { ...current };
-        this.hasUnsentChanges = false;
-        await this.transmitPacket(payload);
+        if (changed || this.hasUnsentChanges) {
+          const payload = `${current.dir} ${current.dir === 'S' ? 0 : current.speed}\n`;
+          this.lastTransmittedCommand = { ...current };
+          this.hasUnsentChanges = false;
+          await this.transmitPacket(payload);
+        } else if (current.dir !== 'S' && now - this.lastSentTime >= 350) {
+          await this.transmitPacket(`${current.dir} ${current.speed}\n`);
+        }
       } else {
-        // Si no hay cambios pero han pasado > 380ms, refrescar con S 0 si está detenido
-        if (now - this.lastSentTime >= 380) {
+        // Modo Palancas
+        const current = this.latestValues;
+        const last = this.lastTransmittedValues;
+        const valuesDiffer = (
+          current.center !== last.center ||
+          current.left !== last.left ||
+          current.right !== last.right
+        );
+
+        if (valuesDiffer || this.hasUnsentChanges) {
+          const cmd = computeSumoMovement(current);
+          const payload = `${cmd.rawPayload}\n`;
+          this.lastTransmittedValues = { ...current };
+          this.hasUnsentChanges = false;
+          await this.transmitPacket(payload);
+        } else if (now - this.lastSentTime >= 380) {
           const cmd = computeSumoMovement(current);
           await this.transmitPacket(`${cmd.rawPayload}\n`);
         }

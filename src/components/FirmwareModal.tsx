@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
-import { Download, Copy, Check, X, Cpu, ShieldCheck, Zap, AlertTriangle, Layers } from 'lucide-react';
+import { Download, Copy, Check, X, Cpu, ShieldCheck, Zap, AlertTriangle, Layers, FileCode, Package, Sliders } from 'lucide-react';
 import { SERVICE_UUID, CHARACTERISTIC_UUID } from '../services/bleService';
+import { APP_JSX_CODE, PACKAGE_JSON_CODE } from '../standaloneAppCode';
 
 interface FirmwareModalProps {
   isOpen: boolean;
   onClose: () => void;
+  initialTab?: 'appjsx' | 'packagejson' | 'code' | 'wiring';
 }
 
 const ESP32_CODE = `#include <Arduino.h>
@@ -214,26 +216,53 @@ void evitarCaidaAtras() {
     velocidadActual = 0;
 }`;
 
-export const FirmwareModal: React.FC<FirmwareModalProps> = ({ isOpen, onClose }) => {
-  const [activeTab, setActiveTab] = useState<'code' | 'wiring' | 'architecture'>('code');
+export const FirmwareModal: React.FC<FirmwareModalProps> = ({ isOpen, onClose, initialTab = 'appjsx' }) => {
+  const [activeTab, setActiveTab] = useState<'appjsx' | 'packagejson' | 'code' | 'wiring' | 'architecture'>(initialTab);
   const [copied, setCopied] = useState(false);
 
   if (!isOpen) return null;
 
+  const getCurrentCode = () => {
+    switch (activeTab) {
+      case 'appjsx':
+        return APP_JSX_CODE;
+      case 'packagejson':
+        return PACKAGE_JSON_CODE;
+      case 'code':
+      default:
+        return ESP32_CODE;
+    }
+  };
+
+  const getDownloadFilename = () => {
+    switch (activeTab) {
+      case 'appjsx':
+        return 'App.jsx';
+      case 'packagejson':
+        return 'package.json';
+      case 'code':
+      default:
+        return 'sumo_robot_ble.ino';
+    }
+  };
+
   const handleCopyCode = async () => {
     try {
-      await navigator.clipboard.writeText(ESP32_CODE);
+      await navigator.clipboard.writeText(getCurrentCode());
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {}
   };
 
-  const handleDownloadIno = () => {
-    const blob = new Blob([ESP32_CODE], { type: 'text/plain;charset=utf-8' });
+  const handleDownloadFile = () => {
+    const code = getCurrentCode();
+    const filename = getDownloadFilename();
+    const mime = filename.endsWith('.json') ? 'application/json' : 'text/plain;charset=utf-8';
+    const blob = new Blob([code], { type: mime });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = 'sumo_robot_ble.ino';
+    link.download = filename;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -250,10 +279,10 @@ export const FirmwareModal: React.FC<FirmwareModalProps> = ({ isOpen, onClose })
             <Cpu className="w-5 h-5 text-cyan-400" />
             <div>
               <h2 className="text-base font-display font-bold text-slate-100">
-                Firmware ESP32 & Diagrama Técnico
+                Código Fuente del Proyecto & Firmware
               </h2>
               <span className="text-xs text-slate-400">
-                Código fuente C++, solución del bug BLE y pineado de hardware
+                App.jsx (React), package.json (Vercel limpio), Firmware C++ y diagrama TB6612FNG
               </span>
             </div>
           </div>
@@ -266,32 +295,54 @@ export const FirmwareModal: React.FC<FirmwareModalProps> = ({ isOpen, onClose })
         </div>
 
         {/* Tab Navigation */}
-        <div className="flex items-center gap-1 px-5 pt-3 border-b border-slate-800 bg-slate-950/40">
+        <div className="flex items-center gap-1 px-5 pt-3 border-b border-slate-800 bg-slate-950/40 overflow-x-auto">
           <button
-            onClick={() => setActiveTab('code')}
-            className={`px-3 py-2 text-xs font-medium rounded-t-lg transition-colors flex items-center gap-1.5 ${
-              activeTab === 'code'
+            onClick={() => setActiveTab('appjsx')}
+            className={`px-3 py-2 text-xs font-medium rounded-t-lg transition-colors flex items-center gap-1.5 whitespace-nowrap ${
+              activeTab === 'appjsx'
                 ? 'bg-slate-800 text-cyan-300 border-t-2 border-cyan-400 font-semibold'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            <Cpu className="w-3.5 h-3.5" />
-            Código C++ (.ino)
+            <FileCode className="w-3.5 h-3.5 text-cyan-400" />
+            App.jsx (Frontend)
+          </button>
+          <button
+            onClick={() => setActiveTab('packagejson')}
+            className={`px-3 py-2 text-xs font-medium rounded-t-lg transition-colors flex items-center gap-1.5 whitespace-nowrap ${
+              activeTab === 'packagejson'
+                ? 'bg-slate-800 text-emerald-300 border-t-2 border-emerald-400 font-semibold'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Package className="w-3.5 h-3.5 text-emerald-400" />
+            package.json (Vercel)
+          </button>
+          <button
+            onClick={() => setActiveTab('code')}
+            className={`px-3 py-2 text-xs font-medium rounded-t-lg transition-colors flex items-center gap-1.5 whitespace-nowrap ${
+              activeTab === 'code'
+                ? 'bg-slate-800 text-amber-300 border-t-2 border-amber-400 font-semibold'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Cpu className="w-3.5 h-3.5 text-amber-400" />
+            ESP32 Firmware (.ino)
           </button>
           <button
             onClick={() => setActiveTab('wiring')}
-            className={`px-3 py-2 text-xs font-medium rounded-t-lg transition-colors flex items-center gap-1.5 ${
+            className={`px-3 py-2 text-xs font-medium rounded-t-lg transition-colors flex items-center gap-1.5 whitespace-nowrap ${
               activeTab === 'wiring'
                 ? 'bg-slate-800 text-cyan-300 border-t-2 border-cyan-400 font-semibold'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
             <Zap className="w-3.5 h-3.5" />
-            Conexión de Pines
+            Pines TB6612
           </button>
           <button
             onClick={() => setActiveTab('architecture')}
-            className={`px-3 py-2 text-xs font-medium rounded-t-lg transition-colors flex items-center gap-1.5 ${
+            className={`px-3 py-2 text-xs font-medium rounded-t-lg transition-colors flex items-center gap-1.5 whitespace-nowrap ${
               activeTab === 'architecture'
                 ? 'bg-slate-800 text-cyan-300 border-t-2 border-cyan-400 font-semibold'
                 : 'text-slate-400 hover:text-slate-200'
@@ -304,11 +355,13 @@ export const FirmwareModal: React.FC<FirmwareModalProps> = ({ isOpen, onClose })
 
         {/* Tab Content */}
         <div className="flex-1 overflow-y-auto p-5 text-sm">
-          {activeTab === 'code' && (
+          {(activeTab === 'appjsx' || activeTab === 'packagejson' || activeTab === 'code') && (
             <div className="space-y-4">
               <div className="flex items-center justify-between">
                 <span className="text-xs text-slate-400">
-                  Listo para compilar en <strong>Arduino IDE</strong> o <strong>PlatformIO</strong> para ESP32 DevKit v1.
+                  {activeTab === 'appjsx' && 'Componente React JSX listo para Vercel o Vite con Web Bluetooth, D-Pad táctil, throttling y botón "G".'}
+                  {activeTab === 'packagejson' && 'Dependencias limpias compatibles con React ^18.3.1 y Vite sin errores ERESOLVE.'}
+                  {activeTab === 'code' && 'Código Arduino C++ listo para compilar con ESP32 DevKit v1.'}
                 </span>
                 <div className="flex items-center gap-2">
                   <button
@@ -316,20 +369,20 @@ export const FirmwareModal: React.FC<FirmwareModalProps> = ({ isOpen, onClose })
                     className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium flex items-center gap-1.5 border border-slate-700 transition-colors"
                   >
                     {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                    {copied ? 'Copiado' : 'Copiar'}
+                    {copied ? '¡Copiado!' : 'Copiar Código'}
                   </button>
                   <button
-                    onClick={handleDownloadIno}
+                    onClick={handleDownloadFile}
                     className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-medium flex items-center gap-1.5 shadow transition-colors"
                   >
                     <Download className="w-3.5 h-3.5" />
-                    Descargar .ino
+                    Descargar {getDownloadFilename()}
                   </button>
                 </div>
               </div>
 
               <div className="relative rounded-xl bg-slate-950 border border-slate-800 p-4 font-mono text-[11px] text-slate-300 leading-relaxed overflow-x-auto max-h-[55vh]">
-                <pre>{ESP32_CODE}</pre>
+                <pre>{getCurrentCode()}</pre>
               </div>
             </div>
           )}
