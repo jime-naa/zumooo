@@ -11,7 +11,9 @@ import {
   Layers, 
   ShieldAlert, 
   Gauge,
-  Sliders
+  Sliders,
+  Zap,
+  Timer
 } from 'lucide-react';
 import { bleService } from './services/bleService';
 import { BleConnectionStatus, BleTelemetry, LeverValues, MotorSpeeds, computeSumoMovement } from './types';
@@ -53,6 +55,10 @@ export default function App() {
 
   // Watchdog virtual indicador (se reinicia con cada paquete)
   const [watchdogProgress, setWatchdogProgress] = useState(100);
+
+  // Estado del Arranque de Combate ('G') y cuenta regresiva reglamentaria de 3s
+  const [combatState, setCombatState] = useState<'idle' | 'countdown' | 'active'>('idle');
+  const [countdownSeconds, setCountdownSeconds] = useState<number>(3);
 
   // Comando de movimiento calculado según la programación del ESP32 ('F', 'R', 'L', 'D', 'S')
   const currentCmd = computeSumoMovement(levers);
@@ -121,9 +127,42 @@ export default function App() {
     setLevers((prev) => ({ ...prev, right: val }));
   }, []);
 
-  // Parada inmediata de emergencia
+  // Arranque de Combate ('G'): Envía 'G' al ESP32 para iniciar el combate
+  const handleCombatStart = async () => {
+    await bleService.sendCombatStart();
+    setCombatState('countdown');
+    setCountdownSeconds(3);
+
+    if (typeof navigator !== 'undefined' && navigator.vibrate) {
+      try { navigator.vibrate([100, 50, 100]); } catch {}
+    }
+  };
+
+  // Cuenta regresiva reglamentaria de 3 segundos de quietud en el dohyo
+  useEffect(() => {
+    if (combatState !== 'countdown') return;
+
+    if (countdownSeconds > 0) {
+      const timer = setTimeout(() => {
+        setCountdownSeconds((prev) => prev - 1);
+        if (typeof navigator !== 'undefined' && navigator.vibrate) {
+          try { navigator.vibrate(80); } catch {}
+        }
+      }, 1000);
+      return () => clearTimeout(timer);
+    } else {
+      setCombatState('active');
+      if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        try { navigator.vibrate([200, 100, 300]); } catch {}
+      }
+    }
+  }, [combatState, countdownSeconds]);
+
+  // Parada inmediata de emergencia (cancela cuenta regresiva y detiene motores)
   const handleEmergencyStop = () => {
     setLevers({ center: 0, left: 0, right: 0 });
+    setCombatState('idle');
+    setCountdownSeconds(3);
     bleService.forceStopImmediate();
   };
 
@@ -176,6 +215,9 @@ export default function App() {
           break;
         case 'e':
           setLevers((prev) => ({ ...prev, right: 80 }));
+          break;
+        case 'g':
+          handleCombatStart();
           break;
         case ' ':
           handleEmergencyStop();
@@ -418,15 +460,64 @@ export default function App() {
               </span>
             </div>
 
-            {/* Botón de Parada de Emergencia Inmediata */}
-            <button
-              onClick={handleEmergencyStop}
-              className="px-2.5 py-1 rounded bg-rose-600/80 hover:bg-rose-500 text-white font-mono text-[10px] font-bold flex items-center gap-1 transition-transform active:scale-95 shadow"
-            >
-              <RotateCcw className="w-3 h-3" />
-              PARADA (S 0)
-            </button>
+            {/* Grupo de Acciones de Combate: Arranque 'G' y Parada 'S 0' */}
+            <div className="flex items-center gap-2">
+              {combatState === 'idle' ? (
+                <button
+                  onClick={handleCombatStart}
+                  className="px-3 py-1 rounded-lg bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-500 hover:from-emerald-500 hover:to-teal-400 text-white font-display text-xs font-bold flex items-center gap-1.5 shadow-md shadow-emerald-500/30 active:scale-95 transition-all border border-emerald-400/60 animate-pulse"
+                  title="Envía el comando 'G' (Go) por Bluetooth para desbloquear los 3 segundos reglamentarios de quietud en el dohyo"
+                >
+                  <Zap className="w-3.5 h-3.5 text-yellow-300" />
+                  <span>INICIAR (G)</span>
+                </button>
+              ) : combatState === 'countdown' ? (
+                <div className="px-3 py-1 rounded-lg bg-amber-500 text-slate-950 font-display text-xs font-bold flex items-center gap-1.5 animate-bounce shadow-md shadow-amber-500/30 border border-amber-300">
+                  <Timer className="w-3.5 h-3.5" />
+                  <span>QUIETUD: {countdownSeconds}s</span>
+                </div>
+              ) : (
+                <div className="px-3 py-1 rounded-lg bg-emerald-600 text-white font-display text-xs font-bold flex items-center gap-1.5 shadow-md shadow-emerald-500/30 border border-emerald-400">
+                  <Zap className="w-3.5 h-3.5 text-yellow-300" />
+                  <span>¡EN COMBATE!</span>
+                </div>
+              )}
+
+              {/* Botón de Parada de Emergencia Inmediata */}
+              <button
+                onClick={handleEmergencyStop}
+                className="px-2.5 py-1 rounded-lg bg-rose-600/80 hover:bg-rose-500 text-white font-mono text-[10px] font-bold flex items-center gap-1 transition-transform active:scale-95 shadow border border-rose-500/50"
+                title="Detener motores inmediatamente (envía 'S 0')"
+              >
+                <RotateCcw className="w-3 h-3" />
+                PARADA (S 0)
+              </button>
+            </div>
           </div>
+
+          {/* Banner de Cuenta Regresiva Reglamentaria (3s de quietud) */}
+          {combatState === 'countdown' && (
+            <div className="w-full mb-2 py-1.5 px-3 rounded-xl bg-amber-950/80 border border-amber-500/60 text-amber-200 text-xs font-mono flex items-center justify-between shadow-lg animate-pulse">
+              <div className="flex items-center gap-2">
+                <Timer className="w-4 h-4 text-amber-400" />
+                <span>REGLAMENTO DOHYO: 3s DE QUIETUD</span>
+              </div>
+              <span className="text-sm font-bold text-amber-300 font-display">
+                ¡GO EN {countdownSeconds}s!
+              </span>
+            </div>
+          )}
+          {combatState === 'active' && (
+            <div className="w-full mb-2 py-1 px-3 rounded-xl bg-emerald-950/70 border border-emerald-500/40 text-emerald-300 text-[11px] font-mono flex items-center justify-between">
+              <span className="flex items-center gap-1.5 font-bold">
+                <Zap className="w-3.5 h-3.5 text-yellow-300" />
+                COMBATE DESBLOQUEADO — CONTROL TOTAL DE MOTORES
+              </span>
+              <span className="text-[10px] text-emerald-400/80 font-sans hidden sm:inline">
+                Comando 'G' transmitido
+              </span>
+            </div>
+          )}
 
           {/* BOTÓN PRINCIPAL DE CONEXIÓN BLUETOOTH (ULTRA-VISIBLE EN EL CENTRO) */}
           {bleStatus !== 'connected' ? (

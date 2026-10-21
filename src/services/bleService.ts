@@ -197,6 +197,24 @@ export class BleService {
   }
 
   /**
+   * BOTÓN DE INICIO / ARRANQUE DE COMBATE ('G')
+   * Envía inmediatamente el carácter 'G' para desbloquear la cuenta regresiva
+   * reglamentaria de 3 segundos de quietud en el dohyo del ESP32.
+   */
+  public async sendCombatStart(): Promise<boolean> {
+    this.latestValues = { center: 0, left: 0, right: 0 };
+    this.hasUnsentChanges = false;
+    if (this.status === 'connected' && this.characteristic) {
+      if (this.isWriting) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      await this.transmitPacket('G\n');
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * BUCLE DE TRANSMISIÓN CON THROTTLING ESTRICTO (50ms - 100ms)
    * Envía los comandos en formato "F 255", "R 200", "L 220", "D 220", "S 0"
    * exactamente como los espera el firmware ESP32 TB6612.
