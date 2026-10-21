@@ -6,13 +6,11 @@ interface DohyoSimulatorProps {
   overrideActive: boolean;
   onTriggerFrontIR?: () => void;
   onTriggerRearIR?: () => void;
-  size?: number;
 }
 
 export const DohyoSimulator: React.FC<DohyoSimulatorProps> = ({
   motorSpeeds,
   overrideActive,
-  size = 200,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
@@ -31,9 +29,9 @@ export const DohyoSimulator: React.FC<DohyoSimulatorProps> = ({
   const [frontSensorActive, setFrontSensorActive] = useState(false);
   const [rearSensorActive, setRearSensorActive] = useState(false);
 
-  // Radio del Dohyo virtual adaptativo
-  const DOHYO_RADIUS = Math.round((size / 2) - 8);
-  const WHITE_BORDER_WIDTH = Math.max(8, Math.round(DOHYO_RADIUS * 0.11));
+  // Radio del Dohyo virtual
+  const DOHYO_RADIUS = 110;
+  const WHITE_BORDER_WIDTH = 12;
 
   // Lógica de simulación de combate y sensores
   useEffect(() => {
@@ -255,8 +253,8 @@ export const DohyoSimulator: React.FC<DohyoSimulatorProps> = ({
       <div className="relative">
         <canvas
           ref={canvasRef}
-          width={size}
-          height={size}
+          width={240}
+          height={240}
           className="rounded-full shadow-inner bg-slate-950"
         />
 

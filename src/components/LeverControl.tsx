@@ -176,7 +176,7 @@ export const LeverControl: React.FC<LeverControlProps> = ({
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
-        className={`relative flex-1 w-20 min-h-[160px] sm:min-h-[200px] max-h-[360px] rounded-2xl bg-gradient-to-b from-slate-900/90 via-slate-950 to-slate-900/90 border-2 touch-none cursor-pointer p-1 transition-all ${
+        className={`relative flex-1 w-20 min-h-[220px] max-h-[380px] rounded-2xl bg-gradient-to-b from-slate-900/90 via-slate-950 to-slate-900/90 border-2 touch-none cursor-pointer p-1 transition-all ${
           isOverridden
             ? 'border-amber-600/50 bg-amber-950/20 shadow-inner'
             : isPointerActive

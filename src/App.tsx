@@ -29,10 +29,11 @@ import { DirectionalPad } from './components/DirectionalPad';
 import { LeverControl } from './components/LeverControl';
 import { DohyoSimulator } from './components/DohyoSimulator';
 import { FirmwareModal } from './components/FirmwareModal';
+import { LandscapeHelper } from './components/LandscapeHelper';
 
 export default function App() {
-  // Modo de Control: 'levers' (3 Palancas virtuales) o 'dpad' (Botones direccionales)
-  const [controlMode, setControlMode] = useState<'levers' | 'dpad'>('levers');
+  // Modo de Control: 'dpad' (Botones direccionales) o 'levers' (3 Palancas virtuales)
+  const [controlMode, setControlMode] = useState<'dpad' | 'levers'>('dpad');
 
   // Dirección activa en D-Pad ('F', 'R', 'L', 'D', 'S')
   const [activeDir, setActiveDir] = useState<MovementDir>('S');
@@ -308,6 +309,9 @@ export default function App() {
   return (
     <div className="relative w-screen h-screen min-h-[460px] bg-slate-950 text-slate-100 flex flex-col overflow-hidden select-none font-sans">
       
+      {/* Guía visual si el móvil se coloca en vertical */}
+      <LandscapeHelper onToggleFullscreen={toggleFullscreen} />
+
       {/* Modal de Código Fuente, Vercel package.json, y Firmware ESP32 */}
       <FirmwareModal
         isOpen={isFirmwareOpen}
@@ -327,27 +331,27 @@ export default function App() {
             </h1>
           </div>
 
-          {/* Toggle Modo 3 Palancas vs D-Pad */}
+          {/* Toggle Modo D-Pad vs Palancas */}
           <div className="flex items-center bg-slate-950/80 p-0.5 rounded-lg border border-slate-800">
             <button
-              onClick={() => setControlMode('levers')}
-              className={`px-2.5 py-0.5 rounded text-[11px] font-medium transition-colors ${
-                controlMode === 'levers'
-                  ? 'bg-cyan-500 text-slate-950 font-bold shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              3 Palancas
-            </button>
-            <button
               onClick={() => setControlMode('dpad')}
-              className={`px-2.5 py-0.5 rounded text-[11px] font-medium transition-colors ${
+              className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors ${
                 controlMode === 'dpad'
                   ? 'bg-cyan-500 text-slate-950 font-bold shadow-sm'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
             >
               D-Pad Táctil
+            </button>
+            <button
+              onClick={() => setControlMode('levers')}
+              className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors ${
+                controlMode === 'levers'
+                  ? 'bg-cyan-500 text-slate-950 font-bold shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              3 Palancas
             </button>
           </div>
         </div>
@@ -503,139 +507,142 @@ export default function App() {
           </div>
         </section>
 
-        {/* COLUMNA 2: NÚCLEO TÁCTICO CENTRAL (INICIO DE COMBATE 'G', DOHYO SIMULATOR, PALANCA CENTRAL Y FRENO) */}
-        <section className="flex-1 h-full p-2 sm:p-3 flex flex-col justify-between items-center bg-slate-950/60 relative z-10 overflow-hidden">
+        {/* COLUMNA 2: NÚCLEO TÁCTICO CENTRAL (INICIO DE COMBATE 'G', SLIDER DE VELOCIDAD Y FRENO) */}
+        <section className="flex-1 h-full p-2 sm:p-4 flex flex-col justify-between items-center bg-slate-950/60 relative z-10 overflow-y-auto">
           
-          {/* 1. SECCIÓN SUPERIOR: BOTÓN DESTACADO DE INICIO DE COMBATE ('G') Y BOTÓN DE FRENO */}
-          <div className="w-full max-w-xl flex items-center gap-2 shrink-0">
+          {/* 1. SECCIÓN SUPERIOR: BOTÓN DESTACADO DE INICIO DE COMBATE ('G') */}
+          <div className="w-full max-w-md flex flex-col items-center">
+            
+            {/* Header del botón */}
+            <div className="flex items-center gap-1.5 mb-1.5">
+              <span className="text-[10px] font-mono font-bold tracking-wider uppercase text-slate-400">
+                Reglamento Dohyo (3s de Quietud)
+              </span>
+              <span className="px-1.5 py-0.2 rounded text-[9px] font-mono bg-amber-500/10 text-amber-300 border border-amber-500/30">
+                Comando 'G'
+              </span>
+            </div>
+
             {/* BOTÓN DESTACADO DE COMBATE O CUENTA REGRESIVA */}
-            <div className="flex-1">
-              {combatState === 'countdown' ? (
-                <div className="w-full py-2 px-3 bg-gradient-to-r from-amber-600/30 via-amber-500/20 to-amber-600/30 border-2 border-amber-400 rounded-xl flex items-center justify-center gap-3 shadow-lg shadow-amber-500/20 animate-pulse">
-                  <div className="w-8 h-8 rounded-full bg-amber-400 text-slate-950 flex items-center justify-center font-black text-xl font-mono shadow-md">
+            {combatState === 'countdown' ? (
+              <div className="w-full py-3 sm:py-4 px-4 bg-gradient-to-r from-amber-600/30 via-amber-500/20 to-amber-600/30 border-2 border-amber-400 rounded-2xl flex flex-col items-center justify-center shadow-lg shadow-amber-500/20 animate-pulse">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-amber-400 text-slate-950 flex items-center justify-center font-black text-2xl font-mono shadow-md">
                     {countdownSeconds}
                   </div>
                   <div className="text-left">
                     <span className="text-xs font-black uppercase text-amber-300 tracking-wider block">
                       ¡3s de Quietud Reglamentaria!
                     </span>
-                    <span className="text-[9px] font-mono text-amber-200/80">
+                    <span className="text-[10px] font-mono text-amber-200/80">
                       Motores bloqueados en el dohyo
                     </span>
                   </div>
                 </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={handleCombatStart}
-                  className="w-full group relative py-2.5 px-3 bg-gradient-to-r from-red-600 via-rose-600 to-amber-600 hover:from-red-500 hover:via-rose-500 hover:to-amber-500 active:scale-[0.98] text-white rounded-xl font-black text-xs sm:text-sm uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg shadow-rose-600/30 transition-all border border-rose-400/40"
-                >
-                  <Swords className="w-4 h-4 text-amber-300 shrink-0 group-hover:rotate-12 transition-transform" />
-                  <span className="drop-shadow-sm font-display tracking-wider">
-                    {combatState === 'active' ? '¡REINICIAR COMBATE (G)!' : 'INICIAR COMBATE (G)'}
-                  </span>
-                  <span className="ml-auto text-[9px] font-mono bg-black/40 px-1.5 py-0.5 rounded text-amber-200">
-                    3s
-                  </span>
-                </button>
-              )}
-            </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={handleCombatStart}
+                className="w-full group relative py-3 sm:py-3.5 px-4 bg-gradient-to-r from-red-600 via-rose-600 to-amber-600 hover:from-red-500 hover:via-rose-500 hover:to-amber-500 active:scale-[0.98] text-white rounded-2xl font-black text-xs sm:text-sm uppercase tracking-wider flex items-center justify-center gap-2.5 shadow-xl shadow-rose-600/30 transition-all border border-rose-400/40"
+              >
+                <span className="absolute inset-0 rounded-2xl bg-white/10 opacity-0 group-hover:opacity-100 transition-opacity" />
+                <Swords className="w-5 h-5 text-amber-300 shrink-0 group-hover:rotate-12 transition-transform" />
+                <span className="drop-shadow-sm font-display tracking-wider">
+                  {combatState === 'active' ? '¡REINICIAR COMBATE (G)!' : 'INICIAR COMBATE (G)'}
+                </span>
+                <span className="ml-auto text-[10px] font-mono font-normal bg-black/30 px-2 py-0.5 rounded text-amber-200">
+                  3s
+                </span>
+              </button>
+            )}
 
-            {/* BOTÓN DE FRENO DE EMERGENCIA ('S 0') */}
-            <button
-              type="button"
-              onClick={handleEmergencyStop}
-              className="py-2.5 px-3 bg-rose-950/70 hover:bg-rose-900 border-2 border-rose-600/80 active:scale-95 text-rose-200 rounded-xl font-bold text-xs uppercase flex items-center gap-1.5 shadow-md shadow-rose-950/50 transition-all shrink-0"
-              title="Detener motores inmediatamente (Espacio)"
-            >
-              <Octagon className="w-4 h-4 text-rose-400 shrink-0" />
-              <span className="hidden sm:inline">FRENO</span>
-              <span>('S 0')</span>
-            </button>
+            {combatState === 'active' && (
+              <div className="mt-1 flex items-center gap-1.5 text-[11px] font-bold text-emerald-400 uppercase tracking-wide">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                <span>¡ROBOT ACTIVO EN EL DOHYO!</span>
+              </div>
+            )}
           </div>
 
-          {/* 2. SECCIÓN CENTRAL INTERMEDIA: PALANCA CENTRAL */}
-          {controlMode === 'levers' ? (
-            <div className="flex-1 w-full max-w-xl flex items-center justify-center my-1 min-h-0">
-              {/* Palanca Central (Empuje Rectilíneo Avance / Reversa) */}
-              <div className="h-full flex flex-col items-center justify-center py-1">
-                <LeverControl
-                  id="center"
-                  label="EMPUJE CENTRAL"
-                  sublabel="Avance / Reversa"
-                  value={levers.center}
-                  onChange={handleCenterChange}
-                  accentColor="emerald"
-                  hasSnapping={true}
-                  isOverridden={isOverrideActive}
-                />
+          {/* 2. SECCIÓN INTERMEDIA: SLIDER DE VELOCIDAD PWM (100 A 255) */}
+          <div className="w-full max-w-md bg-slate-900/90 border border-slate-800 rounded-2xl p-3 shadow-inner my-1">
+            <div className="flex items-center justify-between text-xs font-mono mb-1.5">
+              <div className="flex items-center gap-1.5 text-slate-300 font-semibold">
+                <Zap className="w-4 h-4 text-amber-400" />
+                <span>Potencia de Motores (PWM)</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] text-slate-400">TB6612:</span>
+                <strong className="text-cyan-400 font-mono text-sm px-1.5 py-0.5 bg-slate-950 rounded border border-slate-800">
+                  {speed} <span className="text-[10px] text-slate-500 font-normal">/ 255</span>
+                </strong>
+                <span className="text-[10px] font-mono text-slate-400 ml-1">
+                  ({Math.round((speed / 255) * 100)}%)
+                </span>
               </div>
             </div>
-          ) : (
-            /* Modo D-Pad: slider de velocidad */
-            <div className="flex-1 w-full max-w-md flex flex-col items-center justify-center gap-3 my-1">
-              <div className="w-full bg-slate-900/90 border border-slate-800 rounded-xl p-3 shadow-lg">
-                <div className="flex items-center justify-between text-xs font-mono mb-2">
-                  <div className="flex items-center gap-2 text-slate-300 font-semibold">
-                    <Zap className="w-4 h-4 text-amber-400" />
-                    <span className="text-xs">Velocidad PWM</span>
-                  </div>
-                  <strong className="text-cyan-400 text-xs">{speed} / 255</strong>
-                </div>
-                <input
-                  type="range"
-                  min="100"
-                  max="255"
-                  step="5"
-                  value={speed}
-                  onChange={(e) => handleSpeedChange(Number(e.target.value))}
-                  className="w-full h-3 bg-slate-950 rounded-lg appearance-none cursor-pointer accent-cyan-400"
-                />
-              </div>
-            </div>
-          )}
 
-          {/* 3. SECCIÓN INFERIOR: PRESETS RÁPIDOS DE POTENCIA Y BARRA DE ESTADO */}
-          <div className="w-full max-w-xl flex items-center justify-between gap-2 px-1 text-xs font-mono shrink-0">
-            <div className="flex items-center gap-1 text-[10px]">
-              <span className="text-slate-500 uppercase">Trim:</span>
+            {/* Range Input Slider con thumb táctil */}
+            <div className="relative py-1">
+              <input
+                type="range"
+                min="100"
+                max="255"
+                step="5"
+                value={speed}
+                onChange={(e) => handleSpeedChange(Number(e.target.value))}
+                className="w-full h-3 bg-slate-950 rounded-lg appearance-none cursor-pointer accent-cyan-400 border border-slate-800 focus:outline-none"
+              />
+            </div>
+
+            {/* Presets Rápidos de Velocidad */}
+            <div className="grid grid-cols-4 gap-1.5 mt-2">
               {[
-                { val: 100, label: 'Min' },
-                { val: 180, label: '180' },
-                { val: 220, label: '220' },
-                { val: 255, label: 'Max' },
-              ].map((p) => (
+                { val: 100, label: 'Min (100)' },
+                { val: 180, label: 'Táctico (180)' },
+                { val: 220, label: 'Ataque (220)' },
+                { val: 255, label: 'Turbo (255)' },
+              ].map((item) => (
                 <button
-                  key={p.val}
+                  key={item.val}
                   type="button"
-                  onClick={() => handleSpeedChange(p.val)}
-                  className={`px-1.5 py-0.5 rounded text-[10px] font-mono transition-colors ${
-                    speed === p.val
-                      ? 'bg-cyan-500 text-slate-950 font-bold'
-                      : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
+                  onClick={() => handleSpeedChange(item.val)}
+                  className={`py-1 px-1 text-[10px] font-mono rounded-lg transition-all ${
+                    speed === item.val
+                      ? 'bg-cyan-500 text-slate-950 font-bold shadow-md shadow-cyan-500/30'
+                      : 'bg-slate-800/90 text-slate-300 hover:bg-slate-750 hover:text-white border border-slate-700/60'
                   }`}
                 >
-                  {p.label}
+                  {item.label}
                 </button>
               ))}
             </div>
+          </div>
 
-            {/* Telemetría Compacta */}
-            <div className="flex items-center gap-2 text-[10px] text-slate-400 bg-slate-900/80 px-2 py-0.5 rounded border border-slate-800">
-              <span>TX: <strong className="text-slate-200">{telemetry.packetsPerSec} Hz</strong></span>
-              <span className="text-slate-600">•</span>
-              <span>Trama: <strong className="text-cyan-400">{telemetry.lastPacketPayload}</strong></span>
-            </div>
+          {/* 3. SECCIÓN INFERIOR: BOTÓN DE FRENO DE EMERGENCIA ('S 0') */}
+          <div className="w-full max-w-md flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleEmergencyStop}
+              className="flex-1 py-2 sm:py-2.5 px-3 bg-rose-950/70 hover:bg-rose-900 border-2 border-rose-600/80 active:scale-95 text-rose-200 rounded-xl font-bold text-xs uppercase flex items-center justify-center gap-2 shadow-lg shadow-rose-950/50 transition-all"
+            >
+              <Octagon className="w-4 h-4 text-rose-400 shrink-0" />
+              <span>FRENO TOTAL ('S 0')</span>
+              <span className="hidden sm:inline-block text-[9px] font-mono text-rose-300/80 ml-1">
+                (Espacio)
+              </span>
+            </button>
 
             {/* Enlace rápido para ver package.json limpio */}
             <button
               type="button"
               onClick={() => openCodeModal('packagejson')}
-              className="px-2 py-0.5 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 rounded text-[10px] font-mono flex items-center gap-1 transition-colors"
+              className="px-3 py-2 sm:py-2.5 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 rounded-xl text-xs font-mono flex items-center gap-1.5 transition-colors"
               title="Copiar package.json sin conflictos ERESOLVE"
             >
-              <FileCode className="w-3 h-3 text-emerald-400" />
-              <span>Vercel</span>
+              <FileCode className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="hidden sm:inline">package.json</span>
             </button>
           </div>
         </section>
