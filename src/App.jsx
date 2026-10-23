@@ -11,7 +11,8 @@ import {
   ShieldCheck,
   Cpu,
   Rotate3d,
-  Check
+  Check,
+  Battery
 } from 'lucide-react';
 
 // UUIDs del servidor BLE del ESP32 (TB6612FNG SumoBot)
@@ -24,6 +25,9 @@ const NOTCH_POINTS = [100, 50, 0, -50, -100];
 export default function App() {
   // Modo de control: 'levers' (3 Palancas) o 'dpad' (Botones direccionales)
   const [controlMode, setControlMode] = useState('levers');
+
+  // Estado de Batería del Robot (0% a 100%)
+  const [batteryLevel, setBatteryLevel] = useState(85);
 
   // Estado de conexión Web Bluetooth
   const [device, setDevice] = useState(null);
@@ -182,6 +186,29 @@ export default function App() {
       const service = await server.getPrimaryService(SERVICE_UUID);
       const char = await service.getCharacteristic(CHARACTERISTIC_UUID);
 
+      // Iniciar notificaciones para recibir la batería desde ESP32 en tiempo real
+      try {
+        if (typeof char.startNotifications === 'function') {
+          await char.startNotifications();
+          char.addEventListener('characteristicvaluechanged', (ev) => {
+            try {
+              const text = new TextDecoder().decode(ev.target.value).trim();
+              const match = text.match(/(?:BAT|BATTERY|B)?[:=\s]?\s*(\d{1,3})/i);
+              if (match && match[1]) {
+                const pct = parseInt(match[1], 10);
+                if (!isNaN(pct) && pct >= 0 && pct <= 100) {
+                  setBatteryLevel(pct);
+                }
+              }
+            } catch (rxErr) {
+              console.warn('[BLE RX Error]', rxErr);
+            }
+          });
+        }
+      } catch (notifErr) {
+        console.info('[BLE Notif Error]', notifErr);
+      }
+
       setCharacteristic(char);
       setStatus('connected');
     } catch (err) {
@@ -269,8 +296,38 @@ export default function App() {
           <span>Trama: <strong className="text-cyan-400">{lastPayload}</strong></span>
         </div>
 
-        {/* Botón de Conexión BLE */}
-        <div>
+        {/* Controles de Header: Batería y Conexión BLE */}
+        <div className="flex items-center gap-2">
+          {/* Tarjeta Discreta de Estado de Batería */}
+          <div 
+            onClick={() => {
+              const testVals = [100, 75, 45, 15];
+              const next = testVals[(testVals.indexOf(batteryLevel) + 1) % testVals.length] || 100;
+              setBatteryLevel(next);
+            }}
+            className={`flex items-center gap-2 px-2.5 py-1 rounded-xl bg-slate-900 border text-xs font-mono transition-all cursor-pointer select-none ${
+              batteryLevel > 50 
+                ? 'border-emerald-500/40 text-emerald-400 bg-emerald-500/10' 
+                : batteryLevel >= 20 
+                  ? 'border-amber-500/40 text-amber-400 bg-amber-500/10' 
+                  : 'border-rose-500/50 text-rose-400 bg-rose-500/15 animate-pulse'
+            }`}
+            title="Batería ESP32 (Toca para probar colores: >50% verde, 20-50% amarillo, <20% rojo)"
+          >
+            <Battery className="w-4 h-4 shrink-0" />
+            <span className="font-bold">{batteryLevel}%</span>
+            <div className="w-10 h-1.5 bg-slate-950 rounded-full overflow-hidden p-[1px] border border-slate-800">
+              <div 
+                className={`h-full rounded-full transition-all duration-300 ${
+                  batteryLevel > 50 ? 'bg-emerald-400' : batteryLevel >= 20 ? 'bg-amber-400' : 'bg-rose-500'
+                }`} 
+                style={{ width: `${batteryLevel}%` }} 
+              />
+            </div>
+          </div>
+
+          {/* Botón de Conexión BLE */}
+          <div>
           {status === 'connected' ? (
             <button
               onClick={disconnectBLE}

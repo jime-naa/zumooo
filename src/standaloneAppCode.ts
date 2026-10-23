@@ -27,4 +27,589 @@ export const PACKAGE_JSON_CODE = `{
   }
 }`;
 
-export const APP_JSX_CODE = "import React, { useState, useEffect, useRef, useCallback } from 'react';\nimport { \n  Bluetooth, \n  BluetoothConnected, \n  BluetoothOff, \n  Octagon, \n  Swords, \n  Zap, \n  Sliders, \n  RotateCcw,\n  ShieldCheck,\n  Cpu,\n  Rotate3d,\n  Check\n} from 'lucide-react';\n\n// UUIDs del servidor BLE del ESP32 (TB6612FNG SumoBot)\nconst SERVICE_UUID = \"4fafc201-1fb5-459e-8fcc-c5c9c331914b\";\nconst CHARACTERISTIC_UUID = \"c565818d-6972-466d-88b0-517865f14d02\";\n\n// Puntos de muesca visual para las palancas\nconst NOTCH_POINTS = [100, 50, 0, -50, -100];\n\nexport default function App() {\n  // Modo de control: 'levers' (3 Palancas) o 'dpad' (Botones direccionales)\n  const [controlMode, setControlMode] = useState('levers');\n\n  // Estado de conexión Web Bluetooth\n  const [device, setDevice] = useState(null);\n  const [characteristic, setCharacteristic] = useState(null);\n  const [status, setStatus] = useState('disconnected'); // 'disconnected' | 'connecting' | 'connected' | 'error'\n  const [errorMessage, setErrorMessage] = useState('');\n  \n  // Valores de las 3 Palancas Virtuales (-100 a +100)\n  const [levers, setLevers] = useState({ center: 0, left: 0, right: 0 });\n  \n  // Parámetros de velocidad PWM (100 a 255)\n  const [speed, setSpeed] = useState(220);\n  const [activeDpadDir, setActiveDpadDir] = useState('S');\n\n  // Arranque de Combate ('G') y cuenta regresiva reglamentaria de 3s\n  const [combatState, setCombatState] = useState('idle'); // 'idle' | 'countdown' | 'active'\n  const [countdown, setCountdown] = useState(3);\n  \n  // Telemetría de transmisión\n  const [lastPayload, setLastPayload] = useState('S 0');\n  const [packetsSent, setPacketsSent] = useState(0);\n\n  // Control de flujo (Throttling a 60ms y Candado Mutex)\n  const isWritingRef = useRef(false);\n  const characteristicRef = useRef(null);\n  const lastSentPayloadRef = useRef('S 0');\n  const leversRef = useRef({ center: 0, left: 0, right: 0 });\n  const controlModeRef = useRef('levers');\n  const dpadDirRef = useRef('S');\n  const speedRef = useRef(220);\n\n  // Sincronizar referencias para evitar cierres obsoletos en el timer\n  characteristicRef.current = characteristic;\n  leversRef.current = levers;\n  controlModeRef.current = controlMode;\n  dpadDirRef.current = activeDpadDir;\n  speedRef.current = speed;\n\n  // Anulación diferencial: si se toca palanca izquierda o derecha, se desactiva la central\n  const isOverrideActive = Math.abs(levers.left) > 3 || Math.abs(levers.right) > 3;\n\n  // Cálculo del comando según las 3 palancas\n  const computeCommandFromLevers = (vals) => {\n    const hasDiff = Math.abs(vals.left) > 3 || Math.abs(vals.right) > 3;\n    if (hasDiff) {\n      const netTurn = vals.left - vals.right;\n      const netThrust = (vals.left + vals.right) / 2;\n      if (Math.abs(netTurn) >= Math.abs(netThrust)) {\n        const absTurn = Math.min(100, Math.abs(netTurn));\n        const pwm = Math.round((absTurn / 100) * 255);\n        return { dir: netTurn > 0 ? 'D' : 'L', speed: pwm };\n      } else {\n        const pwm = Math.round((Math.abs(netThrust) / 100) * 255);\n        return { dir: netThrust > 0 ? 'F' : 'R', speed: pwm };\n      }\n    }\n    if (Math.abs(vals.center) > 3) {\n      const pwm = Math.round((Math.abs(vals.center) / 100) * 255);\n      return { dir: vals.center > 0 ? 'F' : 'R', speed: pwm };\n    }\n    return { dir: 'S', speed: 0 };\n  };\n\n  // Transmisión de bajo nivel por BLE con candado Mutex\n  const sendPacket = async (payload) => {\n    if (!characteristicRef.current || isWritingRef.current) return;\n    isWritingRef.current = true;\n    try {\n      const encoder = new TextEncoder();\n      const data = encoder.encode(payload);\n      if (typeof characteristicRef.current.writeValueWithoutResponse === 'function') {\n        await characteristicRef.current.writeValueWithoutResponse(data);\n      } else {\n        await characteristicRef.current.writeValue(data);\n      }\n      const clean = payload.trim();\n      lastSentPayloadRef.current = clean;\n      setLastPayload(clean);\n      setPacketsSent((p) => p + 1);\n    } catch (err) {\n      console.warn('[BLE TX Error]', err);\n    } finally {\n      isWritingRef.current = false;\n    }\n  };\n\n  // Bucle de Throttling a 60ms (Control de velocidad estricto para no saturar al ESP32)\n  useEffect(() => {\n    if (status !== 'connected') return;\n\n    const interval = setInterval(() => {\n      let dir = 'S';\n      let spd = 0;\n\n      if (controlModeRef.current === 'levers') {\n        const cmd = computeCommandFromLevers(leversRef.current);\n        dir = cmd.dir;\n        spd = cmd.speed;\n      } else {\n        dir = dpadDirRef.current;\n        spd = dir === 'S' ? 0 : speedRef.current;\n      }\n\n      const payload = `${dir} ${spd}\\n`;\n      // Transmitir si cambió el valor o keep-alive en movimiento\n      if (payload.trim() !== lastSentPayloadRef.current || dir !== 'S') {\n        sendPacket(payload);\n      }\n    }, 60); // 60ms = ~16Hz\n\n    return () => clearInterval(interval);\n  }, [status]);\n\n  // Manejo de conexión Web Bluetooth\n  const connectBLE = async () => {\n    if (!navigator.bluetooth) {\n      setStatus('error');\n      setErrorMessage('Tu navegador no soporta Web Bluetooth. Usa Chrome o Edge en Android/PC.');\n      return;\n    }\n\n    try {\n      setStatus('connecting');\n      setErrorMessage('');\n\n      const selectedDevice = await navigator.bluetooth.requestDevice({\n        filters: [\n          { namePrefix: 'ESP32_Sumo' },\n          { namePrefix: 'SumoBot' },\n          { services: [SERVICE_UUID] }\n        ],\n        optionalServices: [SERVICE_UUID]\n      }).catch(async (err) => {\n        if (err.name === 'NotFoundError') throw err;\n        return await navigator.bluetooth.requestDevice({\n          acceptAllDevices: true,\n          optionalServices: [SERVICE_UUID]\n        });\n      });\n\n      if (!selectedDevice) {\n        setStatus('disconnected');\n        return;\n      }\n\n      setDevice(selectedDevice);\n\n      selectedDevice.addEventListener('gattserverdisconnected', () => {\n        setDevice(null);\n        setCharacteristic(null);\n        setStatus('disconnected');\n        setCombatState('idle');\n      });\n\n      const server = await selectedDevice.gatt.connect();\n      const service = await server.getPrimaryService(SERVICE_UUID);\n      const char = await service.getCharacteristic(CHARACTERISTIC_UUID);\n\n      setCharacteristic(char);\n      setStatus('connected');\n    } catch (err) {\n      if (err.name === 'NotFoundError') {\n        setStatus('disconnected');\n      } else {\n        setStatus('error');\n        setErrorMessage(err.message || 'Error al conectar al robot');\n      }\n    }\n  };\n\n  const disconnectBLE = () => {\n    if (device && device.gatt.connected) {\n      device.gatt.disconnect();\n    }\n    setDevice(null);\n    setCharacteristic(null);\n    setStatus('disconnected');\n  };\n\n  // Parada de emergencia inmediata ('S 0')\n  const handleEmergencyStop = () => {\n    setLevers({ center: 0, left: 0, right: 0 });\n    setActiveDpadDir('S');\n    setCombatState('idle');\n    setCountdown(3);\n    sendPacket('S 0\\n');\n  };\n\n  // Arranque de Combate ('G'): activa cuenta regresiva de 3s reglamentarios\n  const handleCombatStart = async () => {\n    await sendPacket('G\\n');\n    setCombatState('countdown');\n    setCountdown(3);\n  };\n\n  useEffect(() => {\n    if (combatState !== 'countdown') return;\n    if (countdown > 0) {\n      const timer = setTimeout(() => setCountdown((c) => c - 1), 1000);\n      return () => clearTimeout(timer);\n    } else {\n      setCombatState('active');\n    }\n  }, [combatState, countdown]);\n\n  return (\n    <div className=\"w-screen h-screen min-h-[420px] bg-slate-950 text-slate-100 flex flex-col overflow-hidden select-none font-sans\">\n      \n      {/* BARRA SUPERIOR */}\n      <header className=\"h-12 px-4 border-b border-slate-800 bg-slate-900/90 backdrop-blur flex items-center justify-between gap-3 shrink-0 z-20\">\n        <div className=\"flex items-center gap-3\">\n          <div className=\"flex items-center gap-2\">\n            <div className=\"w-2.5 h-2.5 bg-cyan-400 rotate-45 rounded-sm shadow-sm shadow-cyan-400\" />\n            <span className=\"font-bold text-sm tracking-wide uppercase\">SumoBot BLE</span>\n          </div>\n\n          {/* Selector de Modo */}\n          <div className=\"flex items-center bg-slate-950 p-0.5 rounded-lg border border-slate-800 text-[11px]\">\n            <button\n              onClick={() => setControlMode('levers')}\n              className={`px-2.5 py-0.5 rounded font-medium transition-colors ${\n                controlMode === 'levers' ? 'bg-cyan-500 text-slate-950 font-bold' : 'text-slate-400 hover:text-white'\n              }`}\n            >\n              3 Palancas\n            </button>\n            <button\n              onClick={() => setControlMode('dpad')}\n              className={`px-2.5 py-0.5 rounded font-medium transition-colors ${\n                controlMode === 'dpad' ? 'bg-cyan-500 text-slate-950 font-bold' : 'text-slate-400 hover:text-white'\n              }`}\n            >\n              D-Pad Táctil\n            </button>\n          </div>\n        </div>\n\n        {/* Telemetría Throttling */}\n        <div className=\"hidden sm:flex items-center gap-2 text-[11px] font-mono text-slate-400 bg-slate-950/70 px-2.5 py-1 rounded-lg border border-slate-800\">\n          <Sliders className=\"w-3.5 h-3.5 text-cyan-400\" />\n          <span>Throttling: <strong>60ms</strong></span>\n          <span className=\"text-slate-600\">|</span>\n          <span>Trama: <strong className=\"text-cyan-400\">{lastPayload}</strong></span>\n        </div>\n\n        {/* Botón de Conexión BLE */}\n        <div>\n          {status === 'connected' ? (\n            <button\n              onClick={disconnectBLE}\n              className=\"flex items-center gap-1.5 px-3 py-1 rounded-xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 text-xs font-bold hover:bg-emerald-500/30 transition-all\"\n            >\n              <BluetoothConnected className=\"w-4 h-4 animate-pulse\" />\n              <span>{device?.name || 'ESP32 Conectado'}</span>\n            </button>\n          ) : (\n            <button\n              onClick={connectBLE}\n              disabled={status === 'connecting'}\n              className=\"flex items-center gap-1.5 px-3.5 py-1 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-xs font-bold transition-all shadow-md shadow-cyan-500/20 active:scale-95\"\n            >\n              <Bluetooth className={`w-4 h-4 ${status === 'connecting' ? 'animate-spin' : ''}`} />\n              <span>{status === 'connecting' ? 'Buscando...' : 'Conectar ESP32'}</span>\n            </button>\n          )}\n        </div>\n      </header>\n\n      {/* Banner de Error si ocurre */}\n      {errorMessage && (\n        <div className=\"bg-rose-950/80 border-b border-rose-800 px-4 py-1.5 text-xs text-rose-300 flex items-center justify-between\">\n          <span>{errorMessage}</span>\n          <button onClick={() => setErrorMessage('')} className=\"underline text-rose-400\">Cerrar</button>\n        </div>\n      )}\n\n      {/* CUERPO PRINCIPAL LANDSCAPE (3 COLUMNAS) */}\n      <main className=\"flex-1 flex min-h-0 overflow-hidden relative\">\n\n        {/* COLUMNA 1: PALANCA TRACCIÓN IZQUIERDA */}\n        <section className=\"w-[30%] min-w-[200px] h-full p-2 flex flex-col justify-center items-center border-r border-slate-800 bg-slate-900/30\">\n          <div className=\"w-full flex items-center justify-between px-2 mb-1\">\n            <span className=\"text-[11px] font-mono font-bold uppercase text-slate-300\">Tracción Izquierda</span>\n            <span className=\"text-[11px] font-mono text-cyan-400 font-bold\">{levers.left}%</span>\n          </div>\n          <div className=\"flex-1 w-full flex items-center justify-center py-1\">\n            <VirtualLever\n              label=\"IZQUIERDA\"\n              value={levers.left}\n              onChange={(val) => setLevers((prev) => ({ ...prev, left: val }))}\n              accent=\"cyan\"\n            />\n          </div>\n        </section>\n\n        {/* COLUMNA 2: NÚCLEO CENTRAL (COMBATE 'G', EMPUJE CENTRAL, FRENO TOTAL) */}\n        <section className=\"flex-1 h-full p-2 sm:p-3 flex flex-col justify-between items-center bg-slate-950/60 relative\">\n          \n          {/* Fila Superior: Botón de Combate ('G') y Freno Total ('S 0') */}\n          <div className=\"w-full max-w-md flex items-center gap-2\">\n            <div className=\"flex-1\">\n              {combatState === 'countdown' ? (\n                <div className=\"w-full py-2 px-3 bg-gradient-to-r from-amber-600/30 to-amber-500/20 border-2 border-amber-400 rounded-xl flex items-center justify-center gap-3 animate-pulse\">\n                  <div className=\"w-7 h-7 rounded-full bg-amber-400 text-slate-950 flex items-center justify-center font-black text-lg font-mono\">\n                    {countdown}\n                  </div>\n                  <span className=\"text-xs font-bold uppercase text-amber-300 tracking-wider\">\n                    ¡3s Quietud Dohyo!\n                  </span>\n                </div>\n              ) : (\n                <button\n                  type=\"button\"\n                  onClick={handleCombatStart}\n                  className=\"w-full py-2.5 px-3 bg-gradient-to-r from-red-600 via-rose-600 to-amber-600 hover:from-red-500 hover:to-amber-500 active:scale-95 text-white rounded-xl font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg shadow-rose-600/30 border border-rose-400/30\"\n                >\n                  <Swords className=\"w-4 h-4 text-amber-300\" />\n                  <span>{combatState === 'active' ? 'REINICIAR COMBATE (G)' : 'INICIAR COMBATE (G)'}</span>\n                </button>\n              )}\n            </div>\n\n            <button\n              type=\"button\"\n              onClick={handleEmergencyStop}\n              className=\"py-2.5 px-3 bg-rose-950/80 hover:bg-rose-900 border-2 border-rose-600 active:scale-95 text-rose-200 rounded-xl font-bold text-xs uppercase flex items-center gap-1.5 shadow-md shadow-rose-950/50\"\n            >\n              <Octagon className=\"w-4 h-4 text-rose-400\" />\n              <span>FRENO TOTAL</span>\n            </button>\n          </div>\n\n          {/* Zona Central: Palanca Central Rectilínea */}\n          <div className=\"flex-1 w-full max-w-md flex flex-col items-center justify-center my-1\">\n            <div className=\"flex items-center justify-between w-48 mb-1 px-1\">\n              <span className=\"text-[11px] font-mono font-bold uppercase text-slate-300\">Empuje Central</span>\n              <span className={`text-[11px] font-mono font-bold ${isOverrideActive ? 'text-amber-400' : 'text-emerald-400'}`}>\n                {isOverrideActive ? 'OVERRIDE' : `${levers.center}%`}\n              </span>\n            </div>\n            <div className=\"h-full flex items-center justify-center\">\n              <VirtualLever\n                label=\"EMPUJE CENTRAL\"\n                value={levers.center}\n                onChange={(val) => setLevers((prev) => ({ ...prev, center: val }))}\n                accent=\"emerald\"\n                isOverridden={isOverrideActive}\n              />\n            </div>\n          </div>\n\n          {/* Fila Inferior: Presets de Velocidad PWM */}\n          <div className=\"w-full max-w-md flex items-center justify-between gap-1 text-[10px] font-mono bg-slate-900/80 p-1.5 rounded-xl border border-slate-800\">\n            <span className=\"text-slate-400 uppercase\">PWM:</span>\n            {[100, 180, 220, 255].map((val) => (\n              <button\n                key={val}\n                onClick={() => setSpeed(val)}\n                className={`px-2 py-0.5 rounded font-mono transition-colors ${\n                  speed === val ? 'bg-cyan-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300 hover:text-white'\n                }`}\n              >\n                {val}\n              </button>\n            ))}\n            <span className=\"text-cyan-400 font-bold ml-1\">{speed}/255</span>\n          </div>\n        </section>\n\n        {/* COLUMNA 3: PALANCA TRACCIÓN DERECHA */}\n        <section className=\"w-[30%] min-w-[200px] h-full p-2 flex flex-col justify-center items-center border-l border-slate-800 bg-slate-900/30\">\n          <div className=\"w-full flex items-center justify-between px-2 mb-1\">\n            <span className=\"text-[11px] font-mono font-bold uppercase text-slate-300\">Tracción Derecha</span>\n            <span className=\"text-[11px] font-mono text-amber-400 font-bold\">{levers.right}%</span>\n          </div>\n          <div className=\"flex-1 w-full flex items-center justify-center py-1\">\n            <VirtualLever\n              label=\"DERECHA\"\n              value={levers.right}\n              onChange={(val) => setLevers((prev) => ({ ...prev, right: val }))}\n              accent=\"amber\"\n            />\n          </div>\n        </section>\n\n      </main>\n    </div>\n  );\n}\n\n// Componente de Palanca Táctil con Auto-Retorno al Soltar (Spring Return)\nfunction VirtualLever({ label, value, onChange, accent = 'cyan', isOverridden = false }) {\n  const trackRef = useRef(null);\n  const [isDragging, setIsDragging] = useState(false);\n\n  const calculateValue = (clientY) => {\n    if (!trackRef.current) return 0;\n    const rect = trackRef.current.getBoundingClientRect();\n    const relativeY = clientY - rect.top;\n    const clampedY = Math.max(0, Math.min(rect.height, relativeY));\n    const normalized = 1 - (clampedY / rect.height); // 0 (abajo) a 1 (arriba)\n    let percent = Math.round((normalized * 2 - 1) * 100); // -100 a +100\n    if (Math.abs(percent) < 5) percent = 0;\n    return Math.max(-100, Math.min(100, percent));\n  };\n\n  const handlePointerDown = (e) => {\n    if (isOverridden) return;\n    try { e.target.setPointerCapture(e.pointerId); } catch {}\n    setIsDragging(true);\n    onChange(calculateValue(e.clientY));\n  };\n\n  const handlePointerMove = (e) => {\n    if (!isDragging || isOverridden) return;\n    onChange(calculateValue(e.clientY));\n  };\n\n  const handlePointerUp = () => {\n    setIsDragging(false);\n    onChange(0); // RESORTE VIRTUAL: Retorno automático a 0 al soltar\n  };\n\n  // Posición del cabezal (0% = centro)\n  const thumbPercent = 50 - (value / 2);\n\n  const colorStyles = {\n    cyan: 'bg-cyan-500 border-cyan-300 shadow-cyan-500/40',\n    amber: 'bg-amber-500 border-amber-300 shadow-amber-500/40',\n    emerald: 'bg-emerald-500 border-emerald-300 shadow-emerald-500/40'\n  };\n\n  return (\n    <div\n      ref={trackRef}\n      onPointerDown={handlePointerDown}\n      onPointerMove={handlePointerMove}\n      onPointerUp={handlePointerUp}\n      onPointerCancel={handlePointerUp}\n      className={`relative w-20 min-h-[170px] max-h-[340px] h-full rounded-2xl bg-gradient-to-b from-slate-900 via-slate-950 to-slate-900 border-2 touch-none cursor-pointer p-1 transition-all ${\n        isOverridden ? 'border-amber-600/50 opacity-60' : isDragging ? 'border-cyan-400 shadow-lg shadow-cyan-500/20' : 'border-slate-700 hover:border-slate-500'\n      }`}\n      style={{ touchAction: 'none' }}\n    >\n      {/* Línea Central de Neutro (0%) */}\n      <div className=\"absolute left-2 right-2 top-1/2 -translate-y-1/2 h-0.5 bg-slate-600/80 pointer-events-none flex items-center justify-between px-1\">\n        <span className=\"text-[8px] font-mono text-slate-500 font-bold -translate-y-2.5\">0%</span>\n        <span className=\"text-[8px] font-mono text-slate-500 font-bold -translate-y-2.5\">STOP</span>\n      </div>\n\n      {/* Marcas de muesca */}\n      {NOTCH_POINTS.map((pt) => {\n        if (pt === 0) return null;\n        return (\n          <div\n            key={pt}\n            className=\"absolute left-3 right-3 h-[1px] bg-slate-800 pointer-events-none\"\n            style={{ top: `${50 - pt / 2}%` }}\n          />\n        );\n      })}\n\n      {/* Relleno dinámico de barra */}\n      {!isOverridden && value !== 0 && (\n        <div\n          className={`absolute left-4 right-4 rounded pointer-events-none ${\n            value > 0 ? 'bg-cyan-500/30' : 'bg-rose-500/30'\n          }`}\n          style={{\n            top: value > 0 ? `${thumbPercent}%` : '50%',\n            bottom: value < 0 ? `${100 - thumbPercent}%` : '50%',\n          }}\n        />\n      )}\n\n      {/* Cabezal de la Palanca */}\n      <div\n        className={`absolute left-1.5 right-1.5 h-12 -mt-6 rounded-xl border-2 shadow-md flex flex-col items-center justify-center transition-transform z-10 ${\n          isOverridden\n            ? 'bg-amber-700 border-amber-300 text-amber-100'\n            : isDragging\n              ? `${colorStyles[accent]} scale-105 text-white font-bold`\n              : 'bg-slate-700 border-slate-500 text-slate-200'\n        }`}\n        style={{\n          top: `${thumbPercent}%`,\n          transition: isDragging ? 'none' : 'top 200ms cubic-bezier(0.16, 1, 0.3, 1)',\n        }}\n      >\n        <div className=\"flex flex-col gap-1 w-6 pointer-events-none\">\n          <div className=\"h-[2px] bg-white/40 rounded-full\" />\n          <div className=\"h-[2px] bg-white/40 rounded-full\" />\n        </div>\n        <span className=\"text-[8px] font-mono font-bold mt-1 uppercase\">\n          {isOverridden ? 'LOCK' : value > 0 ? 'FWD' : value < 0 ? 'REV' : 'NEU'}\n        </span>\n      </div>\n    </div>\n  );\n}\n";
+export const APP_JSX_CODE = `import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { 
+  Bluetooth, 
+  BluetoothConnected, 
+  BluetoothOff, 
+  Octagon, 
+  Swords, 
+  Zap, 
+  Sliders, 
+  RotateCcw,
+  ShieldCheck,
+  Cpu,
+  Rotate3d,
+  Check,
+  Battery
+} from 'lucide-react';
+
+// UUIDs del servidor BLE del ESP32 (TB6612FNG SumoBot)
+const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+const CHARACTERISTIC_UUID = "c565818d-6972-466d-88b0-517865f14d02";
+
+// Puntos de muesca visual para las palancas
+const NOTCH_POINTS = [100, 50, 0, -50, -100];
+
+export default function App() {
+  // Modo de control: 'levers' (3 Palancas) o 'dpad' (Botones direccionales)
+  const [controlMode, setControlMode] = useState('levers');
+
+  // Estado de Batería del Robot (0% a 100%)
+  const [batteryLevel, setBatteryLevel] = useState(85);
+
+  // Estado de conexión Web Bluetooth
+  const [device, setDevice] = useState(null);
+  const [characteristic, setCharacteristic] = useState(null);
+  const [status, setStatus] = useState('disconnected'); // 'disconnected' | 'connecting' | 'connected' | 'error'
+  const [errorMessage, setErrorMessage] = useState('');
+  
+  // Valores de las 3 Palancas Virtuales (-100 a +100)
+  const [levers, setLevers] = useState({ center: 0, left: 0, right: 0 });
+  
+  // Parámetros de velocidad PWM (100 a 255)
+  const [speed, setSpeed] = useState(220);
+  const [activeDpadDir, setActiveDpadDir] = useState('S');
+
+  // Arranque de Combate ('G') y cuenta regresiva reglamentaria de 3s
+  const [combatState, setCombatState] = useState('idle'); // 'idle' | 'countdown' | 'active'
+  const [countdown, setCountdown] = useState(3);
+  
+  // Telemetría de transmisión
+  const [lastPayload, setLastPayload] = useState('S 0');
+  const [packetsSent, setPacketsSent] = useState(0);
+
+  // Control de flujo (Throttling a 60ms y Candado Mutex)
+  const isWritingRef = useRef(false);
+  const characteristicRef = useRef(null);
+  const lastSentPayloadRef = useRef('S 0');
+  const leversRef = useRef({ center: 0, left: 0, right: 0 });
+  const controlModeRef = useRef('levers');
+  const dpadDirRef = useRef('S');
+  const speedRef = useRef(220);
+
+  // Sincronizar referencias para evitar cierres obsoletos en el timer
+  characteristicRef.current = characteristic;
+  leversRef.current = levers;
+  controlModeRef.current = controlMode;
+  dpadDirRef.current = activeDpadDir;
+  speedRef.current = speed;
+
+  // Anulación diferencial: si se toca palanca izquierda o derecha, se desactiva la central
+  const isOverrideActive = Math.abs(levers.left) > 3 || Math.abs(levers.right) > 3;
+
+  // Cálculo del comando según las 3 palancas
+  const computeCommandFromLevers = (vals) => {
+    const hasDiff = Math.abs(vals.left) > 3 || Math.abs(vals.right) > 3;
+    if (hasDiff) {
+      const netTurn = vals.left - vals.right;
+      const netThrust = (vals.left + vals.right) / 2;
+      if (Math.abs(netTurn) >= Math.abs(netThrust)) {
+        const absTurn = Math.min(100, Math.abs(netTurn));
+        const pwm = Math.round((absTurn / 100) * 255);
+        return { dir: netTurn > 0 ? 'D' : 'L', speed: pwm };
+      } else {
+        const pwm = Math.round((Math.abs(netThrust) / 100) * 255);
+        return { dir: netThrust > 0 ? 'F' : 'R', speed: pwm };
+      }
+    }
+    if (Math.abs(vals.center) > 3) {
+      const pwm = Math.round((Math.abs(vals.center) / 100) * 255);
+      return { dir: vals.center > 0 ? 'F' : 'R', speed: pwm };
+    }
+    return { dir: 'S', speed: 0 };
+  };
+
+  // Transmisión de bajo nivel por BLE con candado Mutex
+  const sendPacket = async (payload) => {
+    if (!characteristicRef.current || isWritingRef.current) return;
+    isWritingRef.current = true;
+    try {
+      const encoder = new TextEncoder();
+      const data = encoder.encode(payload);
+      if (typeof characteristicRef.current.writeValueWithoutResponse === 'function') {
+        await characteristicRef.current.writeValueWithoutResponse(data);
+      } else {
+        await characteristicRef.current.writeValue(data);
+      }
+      const clean = payload.trim();
+      lastSentPayloadRef.current = clean;
+      setLastPayload(clean);
+      setPacketsSent((p) => p + 1);
+    } catch (err) {
+      console.warn('[BLE TX Error]', err);
+    } finally {
+      isWritingRef.current = false;
+    }
+  };
+
+  // Bucle de Throttling a 60ms (Control de velocidad estricto para no saturar al ESP32)
+  useEffect(() => {
+    if (status !== 'connected') return;
+
+    const interval = setInterval(() => {
+      let dir = 'S';
+      let spd = 0;
+
+      if (controlModeRef.current === 'levers') {
+        const cmd = computeCommandFromLevers(leversRef.current);
+        dir = cmd.dir;
+        spd = cmd.speed;
+      } else {
+        dir = dpadDirRef.current;
+        spd = dir === 'S' ? 0 : speedRef.current;
+      }
+
+      const payload = \`\${dir} \${spd}\\n\`;
+      // Transmitir si cambió el valor o keep-alive en movimiento
+      if (payload.trim() !== lastSentPayloadRef.current || dir !== 'S') {
+        sendPacket(payload);
+      }
+    }, 60); // 60ms = ~16Hz
+
+    return () => clearInterval(interval);
+  }, [status]);
+
+  // Manejo de conexión Web Bluetooth
+  const connectBLE = async () => {
+    if (!navigator.bluetooth) {
+      setStatus('error');
+      setErrorMessage('Tu navegador no soporta Web Bluetooth. Usa Chrome o Edge en Android/PC.');
+      return;
+    }
+
+    try {
+      setStatus('connecting');
+      setErrorMessage('');
+
+      const selectedDevice = await navigator.bluetooth.requestDevice({
+        filters: [
+          { namePrefix: 'ESP32_Sumo' },
+          { namePrefix: 'SumoBot' },
+          { services: [SERVICE_UUID] }
+        ],
+        optionalServices: [SERVICE_UUID]
+      }).catch(async (err) => {
+        if (err.name === 'NotFoundError') throw err;
+        return await navigator.bluetooth.requestDevice({
+          acceptAllDevices: true,
+          optionalServices: [SERVICE_UUID]
+        });
+      });
+
+      if (!selectedDevice) {
+        setStatus('disconnected');
+        return;
+      }
+
+      setDevice(selectedDevice);
+
+      selectedDevice.addEventListener('gattserverdisconnected', () => {
+        setDevice(null);
+        setCharacteristic(null);
+        setStatus('disconnected');
+        setCombatState('idle');
+      });
+
+      const server = await selectedDevice.gatt.connect();
+      const service = await server.getPrimaryService(SERVICE_UUID);
+      const char = await service.getCharacteristic(CHARACTERISTIC_UUID);
+
+      // Iniciar notificaciones para recibir la batería desde ESP32 en tiempo real
+      try {
+        if (typeof char.startNotifications === 'function') {
+          await char.startNotifications();
+          char.addEventListener('characteristicvaluechanged', (ev) => {
+            try {
+              const text = new TextDecoder().decode(ev.target.value).trim();
+              const match = text.match(/(?:BAT|BATTERY|B)?[:=\\s]?\\s*(\\d{1,3})/i);
+              if (match && match[1]) {
+                const pct = parseInt(match[1], 10);
+                if (!isNaN(pct) && pct >= 0 && pct <= 100) {
+                  setBatteryLevel(pct);
+                }
+              }
+            } catch (rxErr) {
+              console.warn('[BLE RX Error]', rxErr);
+            }
+          });
+        }
+      } catch (notifErr) {
+        console.info('[BLE Notif Error]', notifErr);
+      }
+
+      setCharacteristic(char);
+      setStatus('connected');
+    } catch (err) {
+      if (err.name === 'NotFoundError') {
+        setStatus('disconnected');
+      } else {
+        setStatus('error');
+        setErrorMessage(err.message || 'Error al conectar al robot');
+      }
+    }
+  };
+
+  const disconnectBLE = () => {
+    if (device && device.gatt.connected) {
+      device.gatt.disconnect();
+    }
+    setDevice(null);
+    setCharacteristic(null);
+    setStatus('disconnected');
+  };
+
+  // Parada de emergencia inmediata ('S 0')
+  const handleEmergencyStop = () => {
+    setLevers({ center: 0, left: 0, right: 0 });
+    setActiveDpadDir('S');
+    setCombatState('idle');
+    setCountdown(3);
+    sendPacket('S 0\\n');
+  };
+
+  // Arranque de Combate ('G'): activa cuenta regresiva de 3s reglamentarios
+  const handleCombatStart = async () => {
+    await sendPacket('G\\n');
+    setCombatState('countdown');
+    setCountdown(3);
+  };
+
+  useEffect(() => {
+    if (combatState !== 'countdown') return;
+    if (countdown > 0) {
+      const timer = setTimeout(() => setCountdown((c) => c - 1), 1000);
+      return () => clearTimeout(timer);
+    } else {
+      setCombatState('active');
+    }
+  }, [combatState, countdown]);
+
+  return (
+    <div className="w-screen h-screen min-h-[420px] bg-slate-950 text-slate-100 flex flex-col overflow-hidden select-none font-sans">
+      
+      {/* BARRA SUPERIOR */}
+      <header className="h-12 px-4 border-b border-slate-800 bg-slate-900/90 backdrop-blur flex items-center justify-between gap-3 shrink-0 z-20">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <div className="w-2.5 h-2.5 bg-cyan-400 rotate-45 rounded-sm shadow-sm shadow-cyan-400" />
+            <span className="font-bold text-sm tracking-wide uppercase">SumoBot BLE</span>
+          </div>
+
+          {/* Selector de Modo */}
+          <div className="flex items-center bg-slate-950 p-0.5 rounded-lg border border-slate-800 text-[11px]">
+            <button
+              onClick={() => setControlMode('levers')}
+              className={\`px-2.5 py-0.5 rounded font-medium transition-colors \${
+                controlMode === 'levers' ? 'bg-cyan-500 text-slate-950 font-bold' : 'text-slate-400 hover:text-white'
+              }\`}
+            >
+              3 Palancas
+            </button>
+            <button
+              onClick={() => setControlMode('dpad')}
+              className={\`px-2.5 py-0.5 rounded font-medium transition-colors \${
+                controlMode === 'dpad' ? 'bg-cyan-500 text-slate-950 font-bold' : 'text-slate-400 hover:text-white'
+              }\`}
+            >
+              D-Pad Táctil
+            </button>
+          </div>
+        </div>
+
+        {/* Telemetría Throttling */}
+        <div className="hidden sm:flex items-center gap-2 text-[11px] font-mono text-slate-400 bg-slate-950/70 px-2.5 py-1 rounded-lg border border-slate-800">
+          <Sliders className="w-3.5 h-3.5 text-cyan-400" />
+          <span>Throttling: <strong>60ms</strong></span>
+          <span className="text-slate-600">|</span>
+          <span>Trama: <strong className="text-cyan-400">{lastPayload}</strong></span>
+        </div>
+
+        {/* Controles de Header: Batería y Conexión BLE */}
+        <div className="flex items-center gap-2">
+          {/* Tarjeta Discreta de Estado de Batería */}
+          <div 
+            onClick={() => {
+              const testVals = [100, 75, 45, 15];
+              const next = testVals[(testVals.indexOf(batteryLevel) + 1) % testVals.length] || 100;
+              setBatteryLevel(next);
+            }}
+            className={\`flex items-center gap-2 px-2.5 py-1 rounded-xl bg-slate-900 border text-xs font-mono transition-all cursor-pointer select-none \${
+              batteryLevel > 50 
+                ? 'border-emerald-500/40 text-emerald-400 bg-emerald-500/10' 
+                : batteryLevel >= 20 
+                  ? 'border-amber-500/40 text-amber-400 bg-amber-500/10' 
+                  : 'border-rose-500/50 text-rose-400 bg-rose-500/15 animate-pulse'
+            }\`}
+            title="Batería ESP32 (Toca para probar colores: >50% verde, 20-50% amarillo, <20% rojo)"
+          >
+            <Battery className="w-4 h-4 shrink-0" />
+            <span className="font-bold">{batteryLevel}%</span>
+            <div className="w-10 h-1.5 bg-slate-950 rounded-full overflow-hidden p-[1px] border border-slate-800">
+              <div 
+                className={\`h-full rounded-full transition-all duration-300 \${
+                  batteryLevel > 50 ? 'bg-emerald-400' : batteryLevel >= 20 ? 'bg-amber-400' : 'bg-rose-500'
+                }\`} 
+                style={{ width: \`\${batteryLevel}%\` }} 
+              />
+            </div>
+          </div>
+
+          {/* Botón de Conexión BLE */}
+          <div>
+            {status === 'connected' ? (
+              <button
+                onClick={disconnectBLE}
+                className="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 text-xs font-bold hover:bg-emerald-500/30 transition-all"
+              >
+                <BluetoothConnected className="w-4 h-4 animate-pulse" />
+                <span>{device?.name || 'ESP32 Conectado'}</span>
+              </button>
+            ) : (
+              <button
+                onClick={connectBLE}
+                disabled={status === 'connecting'}
+                className="flex items-center gap-1.5 px-3.5 py-1 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-xs font-bold transition-all shadow-md shadow-cyan-500/20 active:scale-95"
+              >
+                <Bluetooth className={\`w-4 h-4 \${status === 'connecting' ? 'animate-spin' : ''}\`} />
+                <span>{status === 'connecting' ? 'Buscando...' : 'Conectar ESP32'}</span>
+              </button>
+            )}
+          </div>
+        </div>
+      </header>
+
+      {/* Banner de Error si ocurre */}
+      {errorMessage && (
+        <div className="bg-rose-950/80 border-b border-rose-800 px-4 py-1.5 text-xs text-rose-300 flex items-center justify-between">
+          <span>{errorMessage}</span>
+          <button onClick={() => setErrorMessage('')} className="underline text-rose-400">Cerrar</button>
+        </div>
+      )}
+
+      {/* CUERPO PRINCIPAL LANDSCAPE (3 COLUMNAS) */}
+      <main className="flex-1 flex min-h-0 overflow-hidden relative">
+
+        {/* COLUMNA 1: PALANCA TRACCIÓN IZQUIERDA */}
+        <section className="w-[30%] min-w-[200px] h-full p-2 flex flex-col justify-center items-center border-r border-slate-800 bg-slate-900/30">
+          <div className="w-full flex items-center justify-between px-2 mb-1">
+            <span className="text-[11px] font-mono font-bold uppercase text-slate-300">Tracción Izquierda</span>
+            <span className="text-[11px] font-mono text-cyan-400 font-bold">{levers.left}%</span>
+          </div>
+          <div className="flex-1 w-full flex items-center justify-center py-1">
+            <VirtualLever
+              label="IZQUIERDA"
+              value={levers.left}
+              onChange={(val) => setLevers((prev) => ({ ...prev, left: val }))}
+              accent="cyan"
+            />
+          </div>
+        </section>
+
+        {/* COLUMNA 2: NÚCLEO CENTRAL (COMBATE 'G', EMPUJE CENTRAL, FRENO TOTAL) */}
+        <section className="flex-1 h-full p-2 sm:p-3 flex flex-col justify-between items-center bg-slate-950/60 relative">
+          
+          {/* Fila Superior: Botón de Combate ('G') y Freno Total ('S 0') */}
+          <div className="w-full max-w-md flex items-center gap-2">
+            <div className="flex-1">
+              {combatState === 'countdown' ? (
+                <div className="w-full py-2 px-3 bg-gradient-to-r from-amber-600/30 to-amber-500/20 border-2 border-amber-400 rounded-xl flex items-center justify-center gap-3 animate-pulse">
+                  <div className="w-7 h-7 rounded-full bg-amber-400 text-slate-950 flex items-center justify-center font-black text-lg font-mono">
+                    {countdown}
+                  </div>
+                  <span className="text-xs font-bold uppercase text-amber-300 tracking-wider">
+                    ¡3s Quietud Dohyo!
+                  </span>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleCombatStart}
+                  className="w-full py-2.5 px-3 bg-gradient-to-r from-red-600 via-rose-600 to-amber-600 hover:from-red-500 hover:to-amber-500 active:scale-95 text-white rounded-xl font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg shadow-rose-600/30 border border-rose-400/30"
+                >
+                  <Swords className="w-4 h-4 text-amber-300" />
+                  <span>{combatState === 'active' ? 'REINICIAR COMBATE (G)' : 'INICIAR COMBATE (G)'}</span>
+                </button>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={handleEmergencyStop}
+              className="py-2.5 px-3 bg-rose-950/80 hover:bg-rose-900 border-2 border-rose-600 active:scale-95 text-rose-200 rounded-xl font-bold text-xs uppercase flex items-center gap-1.5 shadow-md shadow-rose-950/50"
+            >
+              <Octagon className="w-4 h-4 text-rose-400" />
+              <span>FRENO TOTAL</span>
+            </button>
+          </div>
+
+          {/* Zona Central: Palanca Central Rectilínea */}
+          <div className="flex-1 w-full max-w-md flex flex-col items-center justify-center my-1">
+            <div className="flex items-center justify-between w-48 mb-1 px-1">
+              <span className="text-[11px] font-mono font-bold uppercase text-slate-300">Empuje Central</span>
+              <span className={\`text-[11px] font-mono font-bold \${isOverrideActive ? 'text-amber-400' : 'text-emerald-400'}\`}>
+                {isOverrideActive ? 'OVERRIDE' : \`\${levers.center}%\`}
+              </span>
+            </div>
+            <div className="h-full flex items-center justify-center">
+              <VirtualLever
+                label="EMPUJE CENTRAL"
+                value={levers.center}
+                onChange={(val) => setLevers((prev) => ({ ...prev, center: val }))}
+                accent="emerald"
+                isOverridden={isOverrideActive}
+              />
+            </div>
+          </div>
+
+          {/* Fila Inferior: Presets de Velocidad PWM */}
+          <div className="w-full max-w-md flex items-center justify-between gap-1 text-[10px] font-mono bg-slate-900/80 p-1.5 rounded-xl border border-slate-800">
+            <span className="text-slate-400 uppercase">PWM:</span>
+            {[100, 180, 220, 255].map((val) => (
+              <button
+                key={val}
+                onClick={() => setSpeed(val)}
+                className={\`px-2 py-0.5 rounded font-mono transition-colors \${
+                  speed === val ? 'bg-cyan-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300 hover:text-white'
+                }\`}
+              >
+                {val}
+              </button>
+            ))}
+            <span className="text-cyan-400 font-bold ml-1">{speed}/255</span>
+          </div>
+        </section>
+
+        {/* COLUMNA 3: PALANCA TRACCIÓN DERECHA */}
+        <section className="w-[30%] min-w-[200px] h-full p-2 flex flex-col justify-center items-center border-l border-slate-800 bg-slate-900/30">
+          <div className="w-full flex items-center justify-between px-2 mb-1">
+            <span className="text-[11px] font-mono font-bold uppercase text-slate-300">Tracción Derecha</span>
+            <span className="text-[11px] font-mono text-amber-400 font-bold">{levers.right}%</span>
+          </div>
+          <div className="flex-1 w-full flex items-center justify-center py-1">
+            <VirtualLever
+              label="DERECHA"
+              value={levers.right}
+              onChange={(val) => setLevers((prev) => ({ ...prev, right: val }))}
+              accent="amber"
+            />
+          </div>
+        </section>
+
+      </main>
+    </div>
+  );
+}
+
+// Componente de Palanca Táctil con Auto-Retorno al Soltar (Spring Return)
+function VirtualLever({ label, value, onChange, accent = 'cyan', isOverridden = false }) {
+  const trackRef = useRef(null);
+  const [isDragging, setIsDragging] = useState(false);
+
+  const calculateValue = (clientY) => {
+    if (!trackRef.current) return 0;
+    const rect = trackRef.current.getBoundingClientRect();
+    const relativeY = clientY - rect.top;
+    const clampedY = Math.max(0, Math.min(rect.height, relativeY));
+    const normalized = 1 - (clampedY / rect.height); // 0 (abajo) a 1 (arriba)
+    let percent = Math.round((normalized * 2 - 1) * 100); // -100 a +100
+    if (Math.abs(percent) < 5) percent = 0;
+    return Math.max(-100, Math.min(100, percent));
+  };
+
+  const handlePointerDown = (e) => {
+    if (isOverridden) return;
+    try { e.target.setPointerCapture(e.pointerId); } catch {}
+    setIsDragging(true);
+    onChange(calculateValue(e.clientY));
+  };
+
+  const handlePointerMove = (e) => {
+    if (!isDragging || isOverridden) return;
+    onChange(calculateValue(e.clientY));
+  };
+
+  const handlePointerUp = () => {
+    setIsDragging(false);
+    onChange(0); // RESORTE VIRTUAL: Retorno automático a 0 al soltar
+  };
+
+  // Posición del cabezal (0% = centro)
+  const thumbPercent = 50 - (value / 2);
+
+  const colorStyles = {
+    cyan: 'bg-cyan-500 border-cyan-300 shadow-cyan-500/40',
+    amber: 'bg-amber-500 border-amber-300 shadow-amber-500/40',
+    emerald: 'bg-emerald-500 border-emerald-300 shadow-emerald-500/40'
+  };
+
+  return (
+    <div
+      ref={trackRef}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      className={\`relative w-20 min-h-[170px] max-h-[340px] h-full rounded-2xl bg-gradient-to-b from-slate-900 via-slate-950 to-slate-900 border-2 touch-none cursor-pointer p-1 transition-all \${
+        isOverridden ? 'border-amber-600/50 opacity-60' : isDragging ? 'border-cyan-400 shadow-lg shadow-cyan-500/20' : 'border-slate-700 hover:border-slate-500'
+      }\`}
+      style={{ touchAction: 'none' }}
+    >
+      {/* Línea Central de Neutro (0%) */}
+      <div className="absolute left-2 right-2 top-1/2 -translate-y-1/2 h-0.5 bg-slate-600/80 pointer-events-none flex items-center justify-between px-1">
+        <span className="text-[8px] font-mono text-slate-500 font-bold -translate-y-2.5">0%</span>
+        <span className="text-[8px] font-mono text-slate-500 font-bold -translate-y-2.5">STOP</span>
+      </div>
+
+      {/* Marcas de muesca */}
+      {NOTCH_POINTS.map((pt) => {
+        if (pt === 0) return null;
+        return (
+          <div
+            key={pt}
+            className="absolute left-3 right-3 h-[1px] bg-slate-800 pointer-events-none"
+            style={{ top: \`\${50 - pt / 2}%\` }}
+          />
+        );
+      })}
+
+      {/* Relleno dinámico de barra */}
+      {!isOverridden && value !== 0 && (
+        <div
+          className={\`absolute left-4 right-4 rounded pointer-events-none \${
+            value > 0 ? 'bg-cyan-500/30' : 'bg-rose-500/30'
+          }\`}
+          style={{
+            top: value > 0 ? \`\${thumbPercent}%\` : '50%',
+            bottom: value < 0 ? \`\${100 - thumbPercent}%\` : '50%',
+          }}
+        />
+      )}
+
+      {/* Cabezal de la Palanca */}
+      <div
+        className={\`absolute left-1.5 right-1.5 h-12 -mt-6 rounded-xl border-2 shadow-md flex flex-col items-center justify-center transition-transform z-10 \${
+          isOverridden
+            ? 'bg-amber-700 border-amber-300 text-amber-100'
+            : isDragging
+              ? \`\${colorStyles[accent]} scale-105 text-white font-bold\`
+              : 'bg-slate-700 border-slate-500 text-slate-200'
+        }\`}
+        style={{
+          top: \`\${thumbPercent}%\`,
+          transition: isDragging ? 'none' : 'top 200ms cubic-bezier(0.16, 1, 0.3, 1)',
+        }}
+      >
+        <div className="flex flex-col gap-1 w-6 pointer-events-none">
+          <div className="h-[2px] bg-white/40 rounded-full" />
+          <div className="h-[2px] bg-white/40 rounded-full" />
+        </div>
+        <span className="text-[8px] font-mono font-bold mt-1 uppercase">
+          {isOverridden ? 'LOCK' : value > 0 ? 'FWD' : value < 0 ? 'REV' : 'NEU'}
+        </span>
+      </div>
+    </div>
+  );
+}
+`;
+

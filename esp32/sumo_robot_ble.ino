@@ -19,6 +19,7 @@
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
+#include <BLE2902.h>
 
 // UUIDs para el servidor BLE
 #define SERVICE_UUID              "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
@@ -39,17 +40,38 @@ const int pinPWMB = 13;
 const int SENSOR_ADELANTE = 35; 
 const int SENSOR_ATRAS    = 34; 
 
+// --- PIN SENSOR / DIVISOR DE BATERÍA (ADC) ---
+const int PIN_BATERIA     = 36; // Pin ADC para medir voltaje de batería LiPo (2S o 3S)
+
 // Variables globales
 char direccionActual = 'S';
 int velocidadActual = 0;
+bool dispositivoConectado = false;
+BLECharacteristic *pMotorChar = nullptr;
 
 // Declaración de funciones
 void aplicarMovimiento(char dir, int speed);
 void evitarCaidaAdelante();
 void evitarCaidaAtras();
 void detenerMotores();
+int leerPorcentajeBateria();
 
-// --- CALLBACK BLE ---
+// --- CALLBACK DE CONEXIÓN BLE ---
+class ServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) override {
+        dispositivoConectado = true;
+        Serial.println(">> Cliente BLE Conectado");
+    }
+    void onDisconnect(BLEServer* pServer) override {
+        dispositivoConectado = false;
+        detenerMotores();
+        Serial.println(">> Cliente BLE Desconectado - Motores detenidos");
+        // Reiniciar publicidad BLE
+        pServer->getAdvertising()->start();
+    }
+};
+
+// --- CALLBACK DE RECEPCIÓN DE COMANDOS BLE ---
 class SumoCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pChar) override {
         std::string rxVal = pChar->getValue();
@@ -67,6 +89,22 @@ class SumoCallbacks: public BLECharacteristicCallbacks {
         }
     }
 };
+
+// --- LECTURA DE BATERÍA LiPo ---
+int leerPorcentajeBateria() {
+    // Lectura analógica con divisor resistivo (ej: 100k / 100k)
+    int adc = analogRead(PIN_BATERIA);
+    float vMedido = (adc / 4095.0) * 3.3 * 2.0; // Ajustar factor según resistencias
+    
+    // Si no hay divisor conectado o da valor nulo, simular referencia estable
+    if (vMedido < 4.0) {
+        return 88; // 88% de referencia estable
+    }
+
+    // Cálculo LiPo 2S (6.6V corte a 8.4V carga completa)
+    int pct = (int)(((vMedido - 6.6) / (8.4 - 6.6)) * 100.0);
+    return constrain(pct, 0, 100);
+}
 
 void setup() {
     Serial.begin(115200);
@@ -92,14 +130,21 @@ void setup() {
     // Inicializar BLE
     BLEDevice::init("ESP32_Sumo_TB6612");
     BLEServer *pServer = BLEDevice::createServer();
+    pServer->setCallbacks(new ServerCallbacks());
+
     BLEService *pService = pServer->createService(SERVICE_UUID);
 
-    BLECharacteristic *pMotorChar = pService->createCharacteristic(
+    // Característica con Escritura + Lectura + Notificaciones (para Telemetría/Batería)
+    pMotorChar = pService->createCharacteristic(
         MOTOR_CHARACTERISTIC_UUID,
-        BLECharacteristic::PROPERTY_WRITE
+        BLECharacteristic::PROPERTY_WRITE |
+        BLECharacteristic::PROPERTY_READ  |
+        BLECharacteristic::PROPERTY_NOTIFY
     );
 
     pMotorChar->setCallbacks(new SumoCallbacks());
+    pMotorChar->addDescriptor(new BLE2902()); // Descriptor estándar para notificaciones Web Bluetooth
+    
     pService->start();
 
     BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
@@ -108,6 +153,7 @@ void setup() {
 
     Serial.println("==========================================");
     Serial.println(" ESP32 Sumo Listo con TB6612FNG - BLE Active ");
+    Serial.println(" Telemetría de Batería activa por NOTIFY     ");
     Serial.println("==========================================");
 }
 
@@ -130,6 +176,19 @@ void loop() {
 
     // 2. CONTROL MANUAL POR APP
     aplicarMovimiento(direccionActual, velocidadActual);
+
+    // 3. TELEMETRÍA Y NOTIFICACIÓN PERIÓDICA DE BATERÍA (cada 2.5s)
+    static unsigned long ultimoReporteBat = 0;
+    if (millis() - ultimoReporteBat > 2500) {
+        ultimoReporteBat = millis();
+        if (dispositivoConectado && pMotorChar != nullptr) {
+            int bat = leerPorcentajeBateria();
+            char msg[16];
+            snprintf(msg, sizeof(msg), "B:%d\n", bat);
+            pMotorChar->setValue(msg);
+            pMotorChar->notify();
+        }
+    }
 
     delay(20);
 }

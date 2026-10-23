@@ -30,6 +30,10 @@ export class BleService {
   // Callbacks de eventos
   private statusChangeCallback: ((status: BleConnectionStatus, errorMsg?: string) => void) | null = null;
   private telemetryCallback: ((telemetry: BleTelemetry) => void) | null = null;
+  private batteryCallback: ((percentage: number, rawData?: string) => void) | null = null;
+
+  // Estado de Batería (0 a 100%)
+  private batteryPercentage: number = 85;
 
   public status: BleConnectionStatus = 'disconnected';
   public deviceName: string | null = null;
@@ -72,6 +76,22 @@ export class BleService {
     this.telemetryCallback = callback;
   }
 
+  public onBattery(callback: (percentage: number, rawData?: string) => void) {
+    this.batteryCallback = callback;
+  }
+
+  public getBattery(): number {
+    return this.batteryPercentage;
+  }
+
+  public setMockBattery(pct: number) {
+    this.batteryPercentage = Math.max(0, Math.min(100, Math.round(pct)));
+    if (this.batteryCallback) {
+      this.batteryCallback(this.batteryPercentage, `SIM:${this.batteryPercentage}`);
+    }
+    this.notifyTelemetry();
+  }
+
   private setStatus(status: BleConnectionStatus, errorMsg?: string) {
     this.status = status;
     if (this.statusChangeCallback) {
@@ -90,6 +110,7 @@ export class BleService {
         lastPacketTimestamp: this.lastSentTime,
         isWriting: this.isWriting,
         deviceName: this.deviceName,
+        batteryPercentage: this.batteryPercentage,
       });
     }
   }
@@ -146,6 +167,17 @@ export class BleService {
       const service = await server.getPrimaryService(SERVICE_UUID);
       this.characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
 
+      // Iniciar recepción de telemetría/batería en segundo plano desde el ESP32
+      try {
+        if (typeof this.characteristic.startNotifications === 'function') {
+          await this.characteristic.startNotifications();
+          this.characteristic.addEventListener('characteristicvaluechanged', this.handleIncomingData);
+          console.log('[BLE] Notificaciones activas en characteristic');
+        }
+      } catch (notifErr) {
+        console.info('[BLE] startNotifications no soportado o no activo en descriptor:', notifErr);
+      }
+
       this.setStatus('connected');
       this.startThrottleLoop();
       this.notifyTelemetry();
@@ -162,8 +194,86 @@ export class BleService {
     }
   }
 
+  /**
+   * PROCESAMIENTO ASÍNCRONO DE NOTIFICACIONES RECIBIDAS DESDE EL ESP32
+   * Decodifica la batería en tiempo real sin recargar ni interrumpir comandos
+   */
+  private handleIncomingData = (event: Event) => {
+    try {
+      const target = event.target as unknown as { value?: DataView };
+      if (!target || !target.value) return;
+
+      const dataView = target.value;
+      const decoder = new TextDecoder('utf-8');
+      const rawString = decoder.decode(dataView).trim();
+
+      const parsedPct = this.parseBatteryPayload(rawString, dataView);
+      if (parsedPct !== null) {
+        this.batteryPercentage = parsedPct;
+        if (this.batteryCallback) {
+          this.batteryCallback(parsedPct, rawString);
+        }
+        this.notifyTelemetry();
+      }
+    } catch (err) {
+      console.warn('[BLE RX Error]', err);
+    }
+  };
+
+  /**
+   * DECODIFICACIÓN DEL PORCENTAJE DE BATERÍA (0% a 100%)
+   * Soporta múltiples formatos enviados por el firmware ESP32:
+   *  - "B:85", "BAT:85", "B 85", "BAT 85", "BATTERY:85", "85%"
+   *  - Voltaje LiPo: "V:7.8" o "7.8V" (2S: 6.6V-8.4V, 3S: 9.9V-12.6V)
+   *  - Byte binario directo (uint8 de 0 a 100)
+   */
+  public parseBatteryPayload(text: string, dataView?: DataView): number | null {
+    if (!text && !dataView) return null;
+
+    // 1. Patrones estándar de texto (ej: "B:85", "BAT:85", "B 85", "85%")
+    const match = text.match(/(?:BAT|BATTERY|B)?[:=\s]?\s*(\d{1,3})\s*%?/i);
+    if (match && match[1]) {
+      const val = parseInt(match[1], 10);
+      if (!isNaN(val) && val >= 0 && val <= 100) {
+        return val;
+      }
+    }
+
+    // 2. Voltaje LiPo analógico (ej: "V:7.8" o "7.8V")
+    const vMatch = text.match(/(?:V|VOLT)?[:=\s]?\s*([0-9]+(?:\.[0-9]+)?)\s*V?/i);
+    if (vMatch && vMatch[1]) {
+      const volts = parseFloat(vMatch[1]);
+      if (!isNaN(volts) && volts >= 5.0 && volts <= 13.0) {
+        if (volts <= 8.6) {
+          // Batería LiPo 2S (7.4V nominal, 6.6V corte a 8.4V carga completa)
+          const pct = Math.round(((volts - 6.6) / (8.4 - 6.6)) * 100);
+          return Math.max(0, Math.min(100, pct));
+        } else if (volts <= 13.0) {
+          // Batería LiPo 3S (11.1V nominal, 9.9V a 12.6V)
+          const pct = Math.round(((volts - 9.9) / (12.6 - 9.9)) * 100);
+          return Math.max(0, Math.min(100, pct));
+        }
+      }
+    }
+
+    // 3. Byte binario uint8 directo (0 a 100)
+    if (dataView && dataView.byteLength === 1) {
+      const byteVal = dataView.getUint8(0);
+      if (byteVal <= 100) {
+        return byteVal;
+      }
+    }
+
+    return null;
+  }
+
   private handleDisconnection = () => {
     this.stopThrottleLoop();
+    if (this.characteristic) {
+      try {
+        this.characteristic.removeEventListener('characteristicvaluechanged', this.handleIncomingData);
+      } catch {}
+    }
     this.device = null;
     this.characteristic = null;
     this.isWriting = false;

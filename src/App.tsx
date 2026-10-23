@@ -29,6 +29,7 @@ import { DirectionalPad } from './components/DirectionalPad';
 import { LeverControl } from './components/LeverControl';
 import { DohyoSimulator } from './components/DohyoSimulator';
 import { FirmwareModal } from './components/FirmwareModal';
+import { BatteryIndicator } from './components/BatteryIndicator';
 
 export default function App() {
   // Modo de Control: 'levers' (3 Palancas virtuales) o 'dpad' (Botones direccionales)
@@ -50,6 +51,9 @@ export default function App() {
   // Intervalo de Throttling configurable (50ms a 100ms)
   const [throttleMs, setThrottleMs] = useState<number>(60);
 
+  // Estado de Batería del Robot (0% a 100%) recibido desde ESP32
+  const [batteryLevel, setBatteryLevel] = useState<number>(bleService.getBattery());
+
   // Estado BLE y Telemetría
   const [bleStatus, setBleStatus] = useState<BleConnectionStatus>(bleService.status);
   const [bleError, setBleError] = useState<string | null>(null);
@@ -62,6 +66,7 @@ export default function App() {
     lastPacketTimestamp: 0,
     isWriting: false,
     deviceName: null,
+    batteryPercentage: bleService.getBattery(),
   });
 
   // UI Modales y Ajustes
@@ -94,6 +99,13 @@ export default function App() {
     bleService.onTelemetry((telem) => {
       setTelemetry({ ...telem });
       setWatchdogProgress(100);
+      if (telem.batteryPercentage !== undefined) {
+        setBatteryLevel(telem.batteryPercentage);
+      }
+    });
+
+    bleService.onBattery((pct) => {
+      setBatteryLevel(pct);
     });
 
     return () => {
@@ -382,8 +394,15 @@ export default function App() {
           </div>
         </div>
 
-        {/* Zona 3: Botones de Acción (Bluetooth, Código, Sonido, Fullscreen) */}
+        {/* Zona 3: Botones de Acción (Batería, Bluetooth, Código, Sonido, Fullscreen) */}
         <div className="flex items-center gap-2">
+          {/* Tarjeta Visual Discreta: Estado de Batería del Robot */}
+          <BatteryIndicator
+            percentage={batteryLevel}
+            isConnected={bleStatus === 'connected'}
+            onSimulateChange={(newPct) => bleService.setMockBattery(newPct)}
+          />
+
           {/* Botón Ver Código / Vercel */}
           <button
             onClick={() => openCodeModal('appjsx')}
@@ -625,6 +644,8 @@ export default function App() {
               <span>TX: <strong className="text-slate-200">{telemetry.packetsPerSec} Hz</strong></span>
               <span className="text-slate-600">•</span>
               <span>Trama: <strong className="text-cyan-400">{telemetry.lastPacketPayload}</strong></span>
+              <span className="text-slate-600">•</span>
+              <span>Bat: <strong className={batteryLevel > 50 ? 'text-emerald-400' : batteryLevel >= 20 ? 'text-amber-400' : 'text-rose-400'}>{batteryLevel}%</strong></span>
             </div>
 
             {/* Enlace rápido para ver package.json limpio */}

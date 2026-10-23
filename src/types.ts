@@ -121,6 +121,53 @@ export interface BleTelemetry {
   isWriting: boolean;
   deviceName: string | null;
   rssiEstimate?: number;
+  batteryPercentage?: number;
+}
+
+export interface BatteryStatus {
+  percentage: number; // 0 to 100
+  voltage?: number;
+  lastUpdated?: number;
+  rawPayload?: string;
+}
+
+export function getBatteryColorInfo(percentage: number): {
+  color: 'emerald' | 'amber' | 'rose';
+  textColor: string;
+  bgColor: string;
+  borderColor: string;
+  barColor: string;
+  label: string;
+} {
+  const clamped = Math.max(0, Math.min(100, Math.round(percentage)));
+  if (clamped > 50) {
+    return {
+      color: 'emerald',
+      textColor: 'text-emerald-400',
+      bgColor: 'bg-emerald-500/10',
+      borderColor: 'border-emerald-500/40',
+      barColor: 'bg-emerald-400',
+      label: 'Óptima',
+    };
+  }
+  if (clamped >= 20) {
+    return {
+      color: 'amber',
+      textColor: 'text-amber-400',
+      bgColor: 'bg-amber-500/10',
+      borderColor: 'border-amber-500/40',
+      barColor: 'bg-amber-400',
+      label: 'Media',
+    };
+  }
+  return {
+    color: 'rose',
+    textColor: 'text-rose-400',
+    bgColor: 'bg-rose-500/15',
+    borderColor: 'border-rose-500/50',
+    barColor: 'bg-rose-500',
+    label: 'Baja',
+  };
 }
 
 // Declaraciones de tipos para Web Bluetooth API
@@ -156,6 +203,9 @@ declare global {
     value?: DataView;
     writeValue(value: BufferSource): Promise<void>;
     writeValueWithoutResponse?(value: BufferSource): Promise<void>;
+    startNotifications?(): Promise<BluetoothRemoteGATTCharacteristic>;
+    stopNotifications?(): Promise<BluetoothRemoteGATTCharacteristic>;
   }
 }
+
 
