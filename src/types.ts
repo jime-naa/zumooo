@@ -122,11 +122,19 @@ export interface BleTelemetry {
   deviceName: string | null;
   rssiEstimate?: number;
   batteryPercentage?: number;
+  batteryText?: string;
+}
+
+export interface ParsedBatteryData {
+  percentage: number;
+  voltage: number | null;
+  formattedText: string;
 }
 
 export interface BatteryStatus {
   percentage: number; // 0 to 100
-  voltage?: number;
+  voltage?: number | null;
+  formattedText: string; // Ej: "7.8V (85%)"
   lastUpdated?: number;
   rawPayload?: string;
 }
@@ -201,6 +209,7 @@ declare global {
 
   interface BluetoothRemoteGATTCharacteristic extends EventTarget {
     value?: DataView;
+    readValue?(): Promise<DataView>;
     writeValue(value: BufferSource): Promise<void>;
     writeValueWithoutResponse?(value: BufferSource): Promise<void>;
     startNotifications?(): Promise<BluetoothRemoteGATTCharacteristic>;

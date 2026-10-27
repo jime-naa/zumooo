@@ -84,12 +84,17 @@ class SumoCallbacks: public BLECharacteristicCallbacks {
 };
 
 // --- LECTURA DE BATERÍA LiPo ---
-int leerPorcentajeBateria() {
+void obtenerInfoBateria(float &voltaje, int &porcentaje) {
     int adc = analogRead(PIN_BATERIA);
     float vMedido = (adc / 4095.0) * 3.3 * 2.0;
-    if (vMedido < 4.0) return 88; // Referencia si no hay divisor conectado
+    if (vMedido < 4.0) {
+        voltaje = 7.8;
+        porcentaje = 85;
+        return;
+    }
+    voltaje = vMedido;
     int pct = (int)(((vMedido - 6.6) / (8.4 - 6.6)) * 100.0);
-    return constrain(pct, 0, 100);
+    porcentaje = constrain(pct, 0, 100);
 }
 
 void setup() {
@@ -166,9 +171,11 @@ void loop() {
     if (millis() - ultimoReporteBat > 2500) {
         ultimoReporteBat = millis();
         if (dispositivoConectado && pMotorChar != nullptr) {
-            int bat = leerPorcentajeBateria();
-            char msg[16];
-            snprintf(msg, sizeof(msg), "B:%d\n", bat);
+            float v = 0.0;
+            int pct = 0;
+            obtenerInfoBateria(v, pct);
+            char msg[32];
+            snprintf(msg, sizeof(msg), "%.1fV (%d%%)\\n", v, pct);
             pMotorChar->setValue(msg);
             pMotorChar->notify();
         }

@@ -1,4 +1,4 @@
-import { BleConnectionStatus, BleTelemetry, LeverValues, MovementDir, computeSumoMovement } from '../types';
+import { BleConnectionStatus, BleTelemetry, LeverValues, MovementDir, computeSumoMovement, ParsedBatteryData } from '../types';
 
 export const SERVICE_UUID = '4fafc201-1fb5-459e-8fcc-c5c9c331914b';
 export const CHARACTERISTIC_UUID = 'c565818d-6972-466d-88b0-517865f14d02';
@@ -30,10 +30,12 @@ export class BleService {
   // Callbacks de eventos
   private statusChangeCallback: ((status: BleConnectionStatus, errorMsg?: string) => void) | null = null;
   private telemetryCallback: ((telemetry: BleTelemetry) => void) | null = null;
-  private batteryCallback: ((percentage: number, rawData?: string) => void) | null = null;
+  private batteryCallback: ((data: ParsedBatteryData, rawData?: string) => void) | null = null;
 
-  // Estado de Batería (0 a 100%)
+  // Estado de Batería (Voltaje + Porcentaje + Texto Completo ej: "7.8V (85%)")
   private batteryPercentage: number = 85;
+  private batteryVoltage: number | null = 7.8;
+  private batteryFormattedText: string = '7.8V (85%)';
 
   public status: BleConnectionStatus = 'disconnected';
   public deviceName: string | null = null;
@@ -76,7 +78,7 @@ export class BleService {
     this.telemetryCallback = callback;
   }
 
-  public onBattery(callback: (percentage: number, rawData?: string) => void) {
+  public onBattery(callback: (data: ParsedBatteryData, rawData?: string) => void) {
     this.batteryCallback = callback;
   }
 
@@ -84,10 +86,23 @@ export class BleService {
     return this.batteryPercentage;
   }
 
-  public setMockBattery(pct: number) {
-    this.batteryPercentage = Math.max(0, Math.min(100, Math.round(pct)));
+  public getBatteryVoltage(): number | null {
+    return this.batteryVoltage;
+  }
+
+  public getBatteryFormattedText(): string {
+    return this.batteryFormattedText;
+  }
+
+  public setMockBattery(pct: number, volts?: number) {
+    const percentage = Math.max(0, Math.min(100, Math.round(pct)));
+    const voltage = volts !== undefined ? volts : Number((6.6 + (percentage / 100) * (8.4 - 6.6)).toFixed(1));
+    const formattedText = `${voltage.toFixed(1)}V (${percentage}%)`;
+    this.batteryPercentage = percentage;
+    this.batteryVoltage = voltage;
+    this.batteryFormattedText = formattedText;
     if (this.batteryCallback) {
-      this.batteryCallback(this.batteryPercentage, `SIM:${this.batteryPercentage}`);
+      this.batteryCallback({ percentage, voltage, formattedText }, formattedText);
     }
     this.notifyTelemetry();
   }
@@ -111,6 +126,7 @@ export class BleService {
         isWriting: this.isWriting,
         deviceName: this.deviceName,
         batteryPercentage: this.batteryPercentage,
+        batteryText: this.batteryFormattedText,
       });
     }
   }
@@ -174,6 +190,25 @@ export class BleService {
           this.characteristic.addEventListener('characteristicvaluechanged', this.handleIncomingData);
           console.log('[BLE] Notificaciones activas en characteristic');
         }
+
+        // Lectura inicial del valor de la característica si el dispositivo lo soporta
+        if (typeof this.characteristic.readValue === 'function') {
+          try {
+            const initialData = await this.characteristic.readValue();
+            const rawString = new TextDecoder('utf-8').decode(initialData).trim();
+            const parsed = this.parseBatteryPayload(rawString, initialData);
+            if (parsed) {
+              this.batteryPercentage = parsed.percentage;
+              this.batteryVoltage = parsed.voltage;
+              this.batteryFormattedText = parsed.formattedText;
+              if (this.batteryCallback) {
+                this.batteryCallback(parsed, rawString);
+              }
+            }
+          } catch (readErr) {
+            console.info('[BLE Read initial info]', readErr);
+          }
+        }
       } catch (notifErr) {
         console.info('[BLE] startNotifications no soportado o no activo en descriptor:', notifErr);
       }
@@ -207,11 +242,13 @@ export class BleService {
       const decoder = new TextDecoder('utf-8');
       const rawString = decoder.decode(dataView).trim();
 
-      const parsedPct = this.parseBatteryPayload(rawString, dataView);
-      if (parsedPct !== null) {
-        this.batteryPercentage = parsedPct;
+      const parsed = this.parseBatteryPayload(rawString, dataView);
+      if (parsed !== null) {
+        this.batteryPercentage = parsed.percentage;
+        this.batteryVoltage = parsed.voltage;
+        this.batteryFormattedText = parsed.formattedText;
         if (this.batteryCallback) {
-          this.batteryCallback(parsedPct, rawString);
+          this.batteryCallback(parsed, rawString);
         }
         this.notifyTelemetry();
       }
@@ -221,46 +258,77 @@ export class BleService {
   };
 
   /**
-   * DECODIFICACIÓN DEL PORCENTAJE DE BATERÍA (0% a 100%)
-   * Soporta múltiples formatos enviados por el firmware ESP32:
-   *  - "B:85", "BAT:85", "B 85", "BAT 85", "BATTERY:85", "85%"
-   *  - Voltaje LiPo: "V:7.8" o "7.8V" (2S: 6.6V-8.4V, 3S: 9.9V-12.6V)
-   *  - Byte binario directo (uint8 de 0 a 100)
+   * DECODIFICACIÓN DEL TEXTO Y PORCENTAJE DE BATERÍA
+   * Soporta prioritariamente el formato del robot: "7.8V (85%)"
+   * Además de formatos secundarios ("BAT: 7.8V (85%)", "7.8V", "85%", "B:85")
    */
-  public parseBatteryPayload(text: string, dataView?: DataView): number | null {
+  public parseBatteryPayload(text: string, dataView?: DataView): ParsedBatteryData | null {
     if (!text && !dataView) return null;
 
-    // 1. Patrones estándar de texto (ej: "B:85", "BAT:85", "B 85", "85%")
-    const match = text.match(/(?:BAT|BATTERY|B)?[:=\s]?\s*(\d{1,3})\s*%?/i);
-    if (match && match[1]) {
-      const val = parseInt(match[1], 10);
-      if (!isNaN(val) && val >= 0 && val <= 100) {
-        return val;
+    const trimmed = (text || '').trim();
+
+    // 1. FORMATO PRIORITARIO DEL ESP32: "7.8V (85%)" o variantes
+    // Captura Voltaje decimal (ej. 7.8) y Porcentaje entero (ej. 85)
+    const fullMatch = trimmed.match(/([0-9]+(?:\.[0-9]+)?)\s*V\s*\(\s*(\d{1,3})\s*%\s*\)/i);
+    if (fullMatch && fullMatch[1] && fullMatch[2]) {
+      const volts = parseFloat(fullMatch[1]);
+      const pct = parseInt(fullMatch[2], 10);
+      if (!isNaN(pct) && pct >= 0 && pct <= 100) {
+        const vNum = !isNaN(volts) ? Number(volts.toFixed(1)) : null;
+        return {
+          percentage: pct,
+          voltage: vNum,
+          formattedText: vNum !== null ? `${vNum.toFixed(1)}V (${pct}%)` : `${pct}%`,
+        };
       }
     }
 
-    // 2. Voltaje LiPo analógico (ej: "V:7.8" o "7.8V")
-    const vMatch = text.match(/(?:V|VOLT)?[:=\s]?\s*([0-9]+(?:\.[0-9]+)?)\s*V?/i);
+    // 2. Solo Voltaje (ej: "7.8V" o "V: 7.8")
+    const vMatch = trimmed.match(/(?:V|VOLT)?[:=\s]?\s*([0-9]+(?:\.[0-9]+)?)\s*V/i);
     if (vMatch && vMatch[1]) {
       const volts = parseFloat(vMatch[1]);
       if (!isNaN(volts) && volts >= 5.0 && volts <= 13.0) {
+        let pct = 50;
         if (volts <= 8.6) {
-          // Batería LiPo 2S (7.4V nominal, 6.6V corte a 8.4V carga completa)
-          const pct = Math.round(((volts - 6.6) / (8.4 - 6.6)) * 100);
-          return Math.max(0, Math.min(100, pct));
-        } else if (volts <= 13.0) {
-          // Batería LiPo 3S (11.1V nominal, 9.9V a 12.6V)
-          const pct = Math.round(((volts - 9.9) / (12.6 - 9.9)) * 100);
-          return Math.max(0, Math.min(100, pct));
+          // LiPo 2S (6.6V corte a 8.4V lleno)
+          pct = Math.round(((volts - 6.6) / (8.4 - 6.6)) * 100);
+        } else {
+          // LiPo 3S (9.9V a 12.6V)
+          pct = Math.round(((volts - 9.9) / (12.6 - 9.9)) * 100);
         }
+        pct = Math.max(0, Math.min(100, pct));
+        return {
+          percentage: pct,
+          voltage: Number(volts.toFixed(1)),
+          formattedText: `${volts.toFixed(1)}V (${pct}%)`,
+        };
       }
     }
 
-    // 3. Byte binario uint8 directo (0 a 100)
+    // 3. Solo Porcentaje (ej: "B:85", "BAT:85", "85%")
+    const pMatch = trimmed.match(/(?:BAT|BATTERY|B)?[:=\s]?\s*(\d{1,3})\s*%?/i);
+    if (pMatch && pMatch[1]) {
+      const pct = parseInt(pMatch[1], 10);
+      if (!isNaN(pct) && pct >= 0 && pct <= 100) {
+        const estVolts = Number((6.6 + (pct / 100) * (8.4 - 6.6)).toFixed(1));
+        return {
+          percentage: pct,
+          voltage: estVolts,
+          formattedText: `${estVolts.toFixed(1)}V (${pct}%)`,
+        };
+      }
+    }
+
+    // 4. Byte binario uint8 directo (0 a 100)
     if (dataView && dataView.byteLength === 1) {
       const byteVal = dataView.getUint8(0);
       if (byteVal <= 100) {
-        return byteVal;
+        const estVolts = Number((6.6 + (byteVal / 100) * (8.4 - 6.6)).toFixed(1));
+        return {
+          percentage: byteVal,
+          voltage: estVolts,
+          formattedText: `${estVolts.toFixed(1)}V (${byteVal}%)`,
+        };
       }
     }
 
