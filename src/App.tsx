@@ -51,9 +51,8 @@ export default function App() {
   // Intervalo de Throttling configurable (50ms a 100ms)
   const [throttleMs, setThrottleMs] = useState<number>(60);
 
-  // Estado de Batería del Robot (ej: "7.8V (85%)") recibido desde ESP32
+  // Estado de Batería del Robot (0% a 100%) recibido desde ESP32
   const [batteryLevel, setBatteryLevel] = useState<number>(bleService.getBattery());
-  const [batteryText, setBatteryText] = useState<string>(bleService.getBatteryFormattedText());
 
   // Estado BLE y Telemetría
   const [bleStatus, setBleStatus] = useState<BleConnectionStatus>(bleService.status);
@@ -68,7 +67,6 @@ export default function App() {
     isWriting: false,
     deviceName: null,
     batteryPercentage: bleService.getBattery(),
-    batteryText: bleService.getBatteryFormattedText(),
   });
 
   // UI Modales y Ajustes
@@ -104,14 +102,10 @@ export default function App() {
       if (telem.batteryPercentage !== undefined) {
         setBatteryLevel(telem.batteryPercentage);
       }
-      if (telem.batteryText) {
-        setBatteryText(telem.batteryText);
-      }
     });
 
-    bleService.onBattery((data) => {
-      setBatteryLevel(data.percentage);
-      setBatteryText(data.formattedText);
+    bleService.onBattery((pct) => {
+      setBatteryLevel(pct);
     });
 
     return () => {
@@ -402,12 +396,11 @@ export default function App() {
 
         {/* Zona 3: Botones de Acción (Batería, Bluetooth, Código, Sonido, Fullscreen) */}
         <div className="flex items-center gap-2">
-          {/* Tarjeta Visual Dedicada: Estado de Batería del Robot (ej: "7.8V (85%)") */}
+          {/* Tarjeta Visual Discreta: Estado de Batería del Robot */}
           <BatteryIndicator
             percentage={batteryLevel}
-            formattedText={batteryText}
             isConnected={bleStatus === 'connected'}
-            onSimulateChange={(newPct, newVolts) => bleService.setMockBattery(newPct, newVolts)}
+            onSimulateChange={(newPct) => bleService.setMockBattery(newPct)}
           />
 
           {/* Botón Ver Código / Vercel */}
@@ -652,7 +645,7 @@ export default function App() {
               <span className="text-slate-600">•</span>
               <span>Trama: <strong className="text-cyan-400">{telemetry.lastPacketPayload}</strong></span>
               <span className="text-slate-600">•</span>
-              <span>Bat: <strong className={batteryLevel > 50 ? 'text-emerald-400' : batteryLevel >= 20 ? 'text-amber-400' : 'text-rose-400'}>{batteryText}</strong></span>
+              <span>Bat: <strong className={batteryLevel > 50 ? 'text-emerald-400' : batteryLevel >= 20 ? 'text-amber-400' : 'text-rose-400'}>{batteryLevel}%</strong></span>
             </div>
 
             {/* Enlace rápido para ver package.json limpio */}
