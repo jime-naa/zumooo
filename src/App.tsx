@@ -32,11 +32,8 @@ import { FirmwareModal } from './components/FirmwareModal';
 import { BatteryIndicator } from './components/BatteryIndicator';
 
 export default function App() {
-  // Modo de Control: 'dpad' (Mobile-First Pad Direccional) o 'levers' (3 Palancas virtuales)
-  const [controlMode, setControlMode] = useState<'levers' | 'dpad'>('dpad');
-
-  // Formato de Trama BLE: 'char' ('F','R','L','D','S','G') o 'pwm' ("F 255")
-  const [payloadFormat, setPayloadFormat] = useState<'char' | 'pwm'>('char');
+  // Modo de Control: 'levers' (3 Palancas virtuales) o 'dpad' (Botones direccionales)
+  const [controlMode, setControlMode] = useState<'levers' | 'dpad'>('levers');
 
   // Dirección activa en D-Pad ('F', 'R', 'L', 'D', 'S')
   const [activeDir, setActiveDir] = useState<MovementDir>('S');
@@ -54,8 +51,9 @@ export default function App() {
   // Intervalo de Throttling configurable (50ms a 100ms)
   const [throttleMs, setThrottleMs] = useState<number>(60);
 
-  // Estado de Batería del Robot (0% a 100%) recibido desde ESP32
+  // Estado de Batería del Robot (ej: "7.8V (85%)") recibido desde ESP32
   const [batteryLevel, setBatteryLevel] = useState<number>(bleService.getBattery());
+  const [batteryText, setBatteryText] = useState<string>(bleService.getBatteryFormattedText());
 
   // Estado BLE y Telemetría
   const [bleStatus, setBleStatus] = useState<BleConnectionStatus>(bleService.status);
@@ -70,6 +68,7 @@ export default function App() {
     isWriting: false,
     deviceName: null,
     batteryPercentage: bleService.getBattery(),
+    batteryText: bleService.getBatteryFormattedText(),
   });
 
   // UI Modales y Ajustes
@@ -86,14 +85,10 @@ export default function App() {
   const [combatState, setCombatState] = useState<'idle' | 'countdown' | 'active'>('idle');
   const [countdownSeconds, setCountdownSeconds] = useState<number>(3);
 
-  // Sincronizar controlMode y payloadFormat en el servicio BLE
+  // Sincronizar controlMode en el servicio BLE
   useEffect(() => {
     bleService.setControlMode(controlMode);
   }, [controlMode]);
-
-  useEffect(() => {
-    bleService.setPayloadFormat(payloadFormat);
-  }, [payloadFormat]);
 
   // Suscripción al servicio BLE y a la telemetría
   useEffect(() => {
@@ -109,10 +104,14 @@ export default function App() {
       if (telem.batteryPercentage !== undefined) {
         setBatteryLevel(telem.batteryPercentage);
       }
+      if (telem.batteryText) {
+        setBatteryText(telem.batteryText);
+      }
     });
 
-    bleService.onBattery((pct) => {
-      setBatteryLevel(pct);
+    bleService.onBattery((data) => {
+      setBatteryLevel(data.percentage);
+      setBatteryText(data.formattedText);
     });
 
     return () => {
@@ -371,25 +370,8 @@ export default function App() {
           </div>
         </div>
 
-        {/* Zona 2: Control de Throttling & Formato BLE & Telemetría en vivo */}
-        <div className="hidden md:flex items-center gap-3 text-xs font-mono text-slate-400">
-          {/* Selector de Protocolo de Comandos: Carácter ('F') vs PWM ('F 255') */}
-          <div className="flex items-center gap-1.5 bg-slate-950/70 px-2 py-0.5 rounded border border-slate-800">
-            <span className="text-[10px] uppercase text-slate-500">Trama:</span>
-            <button
-              type="button"
-              onClick={() => {
-                const next = payloadFormat === 'char' ? 'pwm' : 'char';
-                setPayloadFormat(next);
-                bleService.setPayloadFormat(next);
-              }}
-              className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-400 hover:bg-cyan-500/30 transition-colors"
-              title="Alternar entre comandos simples de un carácter ('F','R','L','D','S','G') y comandos con PWM ('F 255')"
-            >
-              {payloadFormat === 'char' ? "Solo Char ('F','G')" : "PWM ('F 255')"}
-            </button>
-          </div>
-
+        {/* Zona 2: Control de Throttling & Telemetría en vivo */}
+        <div className="hidden lg:flex items-center gap-3 text-xs font-mono text-slate-400">
           <div className="flex items-center gap-1.5 bg-slate-950/70 px-2 py-0.5 rounded border border-slate-800">
             <Sliders className="w-3.5 h-3.5 text-cyan-400" />
             <span className="text-[10px] uppercase text-slate-500">Throttling:</span>
@@ -397,7 +379,6 @@ export default function App() {
               {[50, 60, 80, 100].map((ms) => (
                 <button
                   key={ms}
-                  type="button"
                   onClick={() => handleThrottleChange(ms)}
                   className={`px-1.5 py-0.2 rounded text-[10px] transition-colors ${
                     throttleMs === ms
@@ -421,11 +402,12 @@ export default function App() {
 
         {/* Zona 3: Botones de Acción (Batería, Bluetooth, Código, Sonido, Fullscreen) */}
         <div className="flex items-center gap-2">
-          {/* Tarjeta Visual Discreta: Estado de Batería del Robot */}
+          {/* Tarjeta Visual Dedicada: Estado de Batería del Robot (ej: "7.8V (85%)") */}
           <BatteryIndicator
             percentage={batteryLevel}
+            formattedText={batteryText}
             isConnected={bleStatus === 'connected'}
-            onSimulateChange={(newPct) => bleService.setMockBattery(newPct)}
+            onSimulateChange={(newPct, newVolts) => bleService.setMockBattery(newPct, newVolts)}
           />
 
           {/* Botón Ver Código / Vercel */}
@@ -496,8 +478,8 @@ export default function App() {
         </div>
       )}
 
-      {/* CUERPO PRINCIPAL DEL COCKPIT (MOBILE-FIRST: RESPONSIVE LANDSCAPE & PORTRAIT) */}
-      <main className="flex-1 flex flex-col lg:flex-row min-h-0 overflow-y-auto lg:overflow-hidden relative pb-3 lg:pb-0">
+      {/* CUERPO PRINCIPAL DEL COCKPIT (LANDSCAPE MODE: 3 COLUMNAS) */}
+      <main className="flex-1 flex min-h-0 overflow-hidden relative">
         
         {/* Fondo sutil con grid cibernético de combate */}
         <div 
@@ -510,8 +492,8 @@ export default function App() {
           }}
         />
 
-        {/* COLUMNA 1: ZONA TÁCTIL (D-PAD O PALANCA IZQ) */}
-        <section className="w-full lg:w-[32%] lg:min-w-[220px] p-2 sm:p-3 flex flex-col justify-center items-center border-b lg:border-b-0 lg:border-r border-slate-800/80 bg-slate-900/40 relative z-10 shrink-0 lg:shrink lg:h-full order-2 lg:order-1">
+        {/* COLUMNA 1: ZONA TÁCTIL IZQUIERDA (D-PAD O PALANCA IZQ) */}
+        <section className="w-[32%] sm:w-[30%] min-w-[210px] h-full p-2 sm:p-3 flex flex-col justify-center items-center border-r border-slate-800/80 bg-slate-900/40 relative z-10">
           <div className="w-full flex items-center justify-between px-2 mb-1">
             <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
@@ -522,7 +504,7 @@ export default function App() {
             </span>
           </div>
 
-          <div className="flex-1 w-full flex items-center justify-center py-2 lg:py-0">
+          <div className="flex-1 w-full flex items-center justify-center">
             {controlMode === 'dpad' ? (
               <DirectionalPad
                 onDirectionStart={handleDirectionStart}
@@ -548,7 +530,7 @@ export default function App() {
         </section>
 
         {/* COLUMNA 2: NÚCLEO TÁCTICO CENTRAL (INICIO DE COMBATE 'G', DOHYO SIMULATOR, PALANCA CENTRAL Y FRENO) */}
-        <section className="flex-1 w-full p-2 sm:p-3 flex flex-col justify-between items-center bg-slate-950/60 relative z-10 min-h-[140px] lg:h-full shrink-0 lg:shrink order-1 lg:order-2 gap-3 lg:gap-0">
+        <section className="flex-1 h-full p-2 sm:p-3 flex flex-col justify-between items-center bg-slate-950/60 relative z-10 overflow-hidden">
           
           {/* 1. SECCIÓN SUPERIOR: BOTÓN DESTACADO DE INICIO DE COMBATE ('G') Y BOTÓN DE FRENO */}
           <div className="w-full max-w-xl flex items-center gap-2 shrink-0">
@@ -585,16 +567,16 @@ export default function App() {
               )}
             </div>
 
-            {/* BOTÓN DE FRENO DE EMERGENCIA ('S' o 'S 0') */}
+            {/* BOTÓN DE FRENO DE EMERGENCIA ('S 0') */}
             <button
               type="button"
               onClick={handleEmergencyStop}
               className="py-2.5 px-3 bg-rose-950/70 hover:bg-rose-900 border-2 border-rose-600/80 active:scale-95 text-rose-200 rounded-xl font-bold text-xs uppercase flex items-center gap-1.5 shadow-md shadow-rose-950/50 transition-all shrink-0"
-              title="Detener motores inmediatamente (Espacio / 'S')"
+              title="Detener motores inmediatamente (Espacio)"
             >
               <Octagon className="w-4 h-4 text-rose-400 shrink-0" />
               <span className="hidden sm:inline">FRENO</span>
-              <span>({payloadFormat === 'char' ? "'S'" : "'S 0'"})</span>
+              <span>('S 0')</span>
             </button>
           </div>
 
@@ -670,7 +652,7 @@ export default function App() {
               <span className="text-slate-600">•</span>
               <span>Trama: <strong className="text-cyan-400">{telemetry.lastPacketPayload}</strong></span>
               <span className="text-slate-600">•</span>
-              <span>Bat: <strong className={batteryLevel > 50 ? 'text-emerald-400' : batteryLevel >= 20 ? 'text-amber-400' : 'text-rose-400'}>{batteryLevel}%</strong></span>
+              <span>Bat: <strong className={batteryLevel > 50 ? 'text-emerald-400' : batteryLevel >= 20 ? 'text-amber-400' : 'text-rose-400'}>{batteryText}</strong></span>
             </div>
 
             {/* Enlace rápido para ver package.json limpio */}
@@ -687,7 +669,7 @@ export default function App() {
         </section>
 
         {/* COLUMNA 3: ZONA DERECHA (MANIOBRAS RÁPIDAS / SIMULADOR / PALANCA DERECHA) */}
-        <section className="w-full lg:w-[32%] lg:min-w-[220px] p-2 sm:p-3 flex flex-col justify-between border-t lg:border-t-0 lg:border-l border-slate-800/80 bg-slate-900/40 relative z-10 shrink-0 lg:shrink lg:h-full order-3">
+        <section className="w-[32%] sm:w-[30%] min-w-[210px] h-full p-2 sm:p-3 flex flex-col justify-between border-l border-slate-800/80 bg-slate-900/40 relative z-10">
           
           <div className="w-full flex items-center justify-between px-2 mb-1">
             <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
