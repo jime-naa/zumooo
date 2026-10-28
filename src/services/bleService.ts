@@ -35,6 +35,9 @@ export class BleService {
   // Estado de Batería (0 a 100%)
   private batteryPercentage: number = 85;
 
+  // Formato de trama de comandos: 'char' (ej: 'F', 'R', 'L', 'D', 'S', 'G') o 'pwm' (ej: 'F 255')
+  private payloadFormat: 'char' | 'pwm' = 'char';
+
   public status: BleConnectionStatus = 'disconnected';
   public deviceName: string | null = null;
 
@@ -316,8 +319,16 @@ export class BleService {
     this.hasUnsentChanges = true;
   }
 
+  public setPayloadFormat(format: 'char' | 'pwm') {
+    this.payloadFormat = format;
+  }
+
+  public getPayloadFormat(): 'char' | 'pwm' {
+    return this.payloadFormat;
+  }
+
   /**
-   * PARADA INMEDIATA DE EMERGENCIA ('S 0')
+   * PARADA INMEDIATA DE EMERGENCIA ('S' o 'S 0')
    */
   public async forceStopImmediate() {
     this.latestValues = { center: 0, left: 0, right: 0 };
@@ -325,7 +336,8 @@ export class BleService {
     this.lastTransmittedCommand = { dir: 'S', speed: 0 };
     this.hasUnsentChanges = true;
     if (!this.isWriting && this.status === 'connected' && this.characteristic) {
-      await this.transmitPacket('S 0\n');
+      const payload = this.payloadFormat === 'char' ? 'S\n' : 'S 0\n';
+      await this.transmitPacket(payload);
     }
   }
 
@@ -350,8 +362,8 @@ export class BleService {
 
   /**
    * BUCLE DE TRANSMISIÓN CON THROTTLING ESTRICTO (50ms - 100ms)
-   * Envía los comandos en formato "F 255", "R 200", "L 220", "D 220", "S 0"
-   * exactamente como los espera el firmware ESP32 TB6612.
+   * Envía los comandos en formato directo ('F', 'R', 'L', 'D', 'S') o con PWM ("F 255")
+   * sin congelar el navegador móvil ni saturar el búfer del ESP32.
    */
   private startThrottleLoop() {
     this.stopThrottleLoop();
@@ -375,12 +387,17 @@ export class BleService {
         const changed = current.dir !== last.dir || current.speed !== last.speed;
 
         if (changed || this.hasUnsentChanges) {
-          const payload = `${current.dir} ${current.dir === 'S' ? 0 : current.speed}\n`;
+          const payload = this.payloadFormat === 'char'
+            ? `${current.dir}\n`
+            : `${current.dir} ${current.dir === 'S' ? 0 : current.speed}\n`;
           this.lastTransmittedCommand = { ...current };
           this.hasUnsentChanges = false;
           await this.transmitPacket(payload);
         } else if (current.dir !== 'S' && now - this.lastSentTime >= 350) {
-          await this.transmitPacket(`${current.dir} ${current.speed}\n`);
+          const payload = this.payloadFormat === 'char'
+            ? `${current.dir}\n`
+            : `${current.dir} ${current.speed}\n`;
+          await this.transmitPacket(payload);
         }
       } else {
         // Modo Palancas
